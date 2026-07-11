@@ -86,6 +86,15 @@ export const enStream: Record<string, string> = {
   'Retirer le mot-clé masqué': 'Remove the masked keyword',
   'Retirer {text}': 'Remove {text}',
 
+  // StreamPage: appearance (accent color) card
+  'Apparence': 'Appearance',
+  'La couleur qui signale le Mode Stream dans l’interface.':
+    'The color that signals Stream Mode across the UI.',
+  'Choisir cette couleur ({hex})': 'Pick this color ({hex})',
+  'Couleur personnalisée': 'Custom color',
+  'Appliquée en direct au liseré de fenêtre, au bouclier de la barre d’outils et à tous les indicateurs du Mode Stream, en thème clair comme en thème sombre.':
+    'Applied live to the window ring, the toolbar shield and every Stream Mode indicator, in light and dark themes alike.',
+
   // PermissionPrompt
   'Ce site': 'This site',
   'souhaite {label}.': 'wants to {label}.',

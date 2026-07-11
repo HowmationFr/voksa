@@ -32,6 +32,7 @@ export default {
           DEFAULT: withAlpha('--stream'),
           active: withAlpha('--stream-active'),
           muted: withAlpha('--stream-muted'),
+          fg: withAlpha('--stream-fg'),
         },
         danger: {
           DEFAULT: withAlpha('--danger'),

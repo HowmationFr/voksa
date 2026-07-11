@@ -150,7 +150,7 @@ export function SettingsPage(): React.ReactElement {
           >
             <div
               className={`flex-shrink-0 flex items-center justify-center w-11 h-11 rounded-xl transition-colors ${
-                stream.enabled ? 'bg-stream text-white' : 'bg-stream/10 text-stream'
+                stream.enabled ? 'bg-stream text-stream-fg' : 'bg-stream/10 text-stream'
               }`}
             >
               <Shield size={20} strokeWidth={2.2} />

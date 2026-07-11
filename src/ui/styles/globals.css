@@ -30,6 +30,7 @@
   --stream: 139 92 246;
   --stream-active: 124 58 237;
   --stream-muted: 237 233 254;
+  --stream-fg: 255 255 255;
 
   --danger: 229 72 77;
   --danger-hover: 208 58 63;
@@ -66,6 +67,7 @@
   --stream: 167 139 250;
   --stream-active: 139 92 246;
   --stream-muted: 45 38 72;
+  --stream-fg: 255 255 255;
 
   --danger: 255 111 116;
   --danger-hover: 255 134 138;

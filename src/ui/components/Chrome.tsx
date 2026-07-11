@@ -16,6 +16,7 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { useTabsStore } from '../stores/tabsStore';
 import { useStreamStore } from '../stores/streamStore';
 import { useCurtainStore } from '../stores/curtainStore';
+import { buildStreamColorCss } from '../../shared/streamColor';
 
 function internalSlugForUrl(url: string): Slug | null {
   if (!url.startsWith('voksa://')) return null;
@@ -50,6 +51,13 @@ export function Chrome(): React.ReactElement {
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
   const streamEnabled = useStreamStore((s) => s.config.enabled);
+  const streamColor = useStreamStore((s) => s.config.color);
+  // User-picked Stream Mode accent: overrides the --stream* tokens of
+  // globals.css for the whole chrome document. Null (default color or invalid
+  // value) keeps the hand-tuned default palette untouched. Rendered later in
+  // document order than the bundled stylesheet, so its :root/:root.dark
+  // blocks win in their respective themes.
+  const streamColorCss = useMemo(() => buildStreamColorCss(streamColor), [streamColor]);
   const curtain = useCurtainStore((s) =>
     activeTab ? (s.curtains.get(activeTab.id) ?? null) : null,
   );
@@ -119,7 +127,8 @@ export function Chrome(): React.ReactElement {
 
   return (
     <div className="relative flex flex-col h-screen w-screen">
-      {/* Stream Mode active indicator: a distinct violet accent so the state
+      {streamColorCss !== null && <style>{streamColorCss}</style>}
+      {/* Stream Mode active indicator: a distinct accent color so the state
           is unmistakable at a glance while live. */}
       {streamEnabled && (
         <>

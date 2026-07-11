@@ -11,7 +11,7 @@ import type {
   PrintPreviewOptions,
   Suggestion,
 } from '../../shared/types';
-import type { StreamModeConfig } from '../../shared/streamConfig';
+import { sameMaskingConfig, type StreamModeConfig } from '../../shared/streamConfig';
 import type { AppWindow } from '../window';
 import { getStreamMode } from '../stream-mode/StreamModeController';
 import { installPermissionHandlers } from '../stream-mode/permissions';
@@ -66,13 +66,20 @@ export function registerIpcHandlers(appWindow: AppWindow): void {
 
   // Stream config broadcasts: reach the chrome UI AND every frame of every
   // tab (subframes run their own masker under nodeIntegrationInSubFrames).
+  let prevStreamConfig = stream.getConfig();
   stream.on('config-changed', (config: StreamModeConfig) => {
+    const maskingChanged = !sameMaskingConfig(prevStreamConfig, config);
+    prevStreamConfig = config;
     // Can fire after teardown: a recorder-watcher poll in flight at quit
     // completes late and flips the config against a destroyed chromeView.
     if (chromeView.webContents.isDestroyed()) return;
     // Stream just went live while a status bubble may be on screen.
     if (config.enabled) appWindow.statusView.hide({ immediate: true });
     chromeView.webContents.send(IPC.STREAM_CONFIG_CHANGED, config);
+    // Cosmetic-only change (accent color): the chrome UI above is the only
+    // consumer. Page maskers never read it, so skip the per-frame push and
+    // spare a full re-sweep of every page on each color-picker step.
+    if (!maskingChanged) return;
     for (const wc of webContents.getAllWebContents()) {
       if (wc.id === chromeView.webContents.id) continue;
       try {

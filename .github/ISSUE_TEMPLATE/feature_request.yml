@@ -19,9 +19,3 @@ body:
     id: alternatives
     attributes:
       label: Alternatives considered
-  - type: checkboxes
-    id: scope
-    attributes:
-      label: Scope check
-      options:
-        - label: I checked CLAUDE.md section 9 (out of scope for now) and this is not listed there, or I explain why it should move into scope.

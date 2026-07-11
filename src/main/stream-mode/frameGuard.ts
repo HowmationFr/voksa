@@ -534,7 +534,27 @@ export class FrameGuard {
       }
     }
 
-    this.push(active && (uncovered > 0 || Date.now() < this.settleUntil), all);
+    const now = Date.now();
+    const settling = now < this.settleUntil;
+
+    // LIVENESS. setTimeout can fire up to a millisecond EARLY (libuv rounds to
+    // ms), so the settle timer's own callback can land here with the window not
+    // quite expired. It has already cleared itself, and nothing else is
+    // guaranteed to fire again: the tab would stay "pending" forever, iframes
+    // hidden for the rest of the stream even though every subframe is covered.
+    // That is not a leak (we fail closed), but it breaks the page. Re-arm for
+    // the remainder whenever the verdict hangs on the window alone. Scheduling
+    // an evaluation can never reveal anything early: only the seq echo and the
+    // coverage count decide that.
+    if (settling && !this.settleTimer) {
+      const remaining = Math.max(1, this.settleUntil - now);
+      this.settleTimer = setTimeout(() => {
+        this.settleTimer = null;
+        this.evaluateNow();
+      }, remaining);
+    }
+
+    this.push(active && (uncovered > 0 || settling), all);
   }
 
   /** Push the tab-level verdict to every frame of the tab (deduped, per frame). */

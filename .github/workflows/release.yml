@@ -50,7 +50,17 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           if gh release view "$TAG" > /dev/null 2>&1; then
-            echo "Release $TAG already exists, reusing it."
+            # electron-builder refuses to upload into a PUBLISHED release when
+            # it is configured to publish drafts (electron-builder.yml:
+            # publish.releaseType), and it SKIPS SILENTLY: the job would go
+            # green with zero assets attached. Never create the release by
+            # hand, let this job do it.
+            IS_DRAFT="$(gh release view "$TAG" --json isDraft -q .isDraft)"
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "::error::Release $TAG already exists and is PUBLISHED. electron-builder can only upload into a draft, so it would skip every artifact and this run would be a false green. Turn it back into a draft ('gh release edit $TAG --draft') and re-run, or delete it and let this job recreate it."
+              exit 1
+            fi
+            echo "Draft $TAG already exists, reusing it."
           else
             gh release create "$TAG" --draft --title "Voksa ${TAG#v}" --generate-notes
           fi
@@ -96,3 +106,36 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npx electron-builder --mac --publish always
+
+  verify:
+    name: Verify the draft actually has its artifacts
+    needs: artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every expected asset must be attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release view "$TAG" -R "${GITHUB_REPOSITORY}" --json assets -q '.assets[].name' | sort > assets.txt
+          echo "Assets attached to $TAG:"; cat assets.txt
+          # electron-builder can skip uploads and still exit 0 (it did once:
+          # a hand-created published release made every artifact "skipped
+          # publishing" while all three jobs went green). Assert the result
+          # instead of trusting the exit code. The three latest*.yml files are
+          # what the auto-updater reads: without them, updates are dead.
+          missing=0
+          for pattern in 'Voksa-Setup-.*\.exe$' 'latest\.yml$' \
+                         '.*-mac-x64\.dmg$' '.*-mac-arm64\.dmg$' \
+                         '.*-mac-x64\.zip$' '.*-mac-arm64\.zip$' 'latest-mac\.yml$' \
+                         '.*\.AppImage$' '.*\.deb$' 'latest-linux\.yml$'; do
+            if ! grep -qE "$pattern" assets.txt; then
+              echo "::error::Missing release asset matching /$pattern/"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::The draft is incomplete. Do NOT publish it: users (and the auto-updater) would get a broken release."
+            exit 1
+          fi
+          echo "All expected artifacts are attached."

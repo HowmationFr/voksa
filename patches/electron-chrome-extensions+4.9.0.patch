@@ -1,0 +1,209 @@
+diff --git a/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js b/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js
+index 67d3be4..7824466 100644
+--- a/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js
++++ b/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js
+@@ -14,6 +14,10 @@
+   var import_electron = __require("electron");
+   var formatIpcName = (name) => `crx-${name}`;
+   var listenerMap = /* @__PURE__ */ new Map();
++  // PATCH(voksa): extensions legitimately register dozens of chrome.* event
++  // listeners (each maps to one ipcRenderer listener); silence the default
++  // 10-listener EventEmitter warning.
++  if (import_electron.ipcRenderer.setMaxListeners) import_electron.ipcRenderer.setMaxListeners(0);
+   var addExtensionListener = (extensionId, name, callback) => {
+     const listenerCount = listenerMap.get(name) || 0;
+     if (listenerCount === 0) {
+@@ -449,12 +453,107 @@
+         },
+         storage: {
+           factory: (base) => {
++            // PATCH(voksa): Electron never dispatches chrome.storage.onChanged.
++            // Wrap every area so writes compute their {oldValue,newValue}
++            // changes and report them to the main process ("storage.changed"),
++            // which rebroadcasts to all of this extension's contexts. onChanged
++            // becomes a router-fed ExtensionEvent (the native one never fires).
++            const notifyChanged = invokeExtension2("storage.changed");
++            const globalOnChanged = new ExtensionEvent("storage.onChanged");
++            const wrapArea = (area, areaName) => {
++              if (!area) return area;
++              const onChanged = new ExtensionEvent(`storage.${areaName}.onChanged`);
++              const callbackify = (promise, callback) => {
++                if (!callback) return promise;
++                promise.then(
++                  (result) => callback(result),
++                  () => callback()
++                );
++                return void 0;
++              };
++              const readOld = async (keys) => {
++                try {
++                  return await area.get(keys);
++                } catch {
++                  return {};
++                }
++              };
++              const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
++              const wrapped = {
++                get: (...args) => area.get(...args),
++                set: (items, callback) => callbackify(
++                  (async () => {
++                    const keys = Object.keys(items || {});
++                    const old = await readOld(keys);
++                    const result = await area.set(items);
++                    if (keys.length > 0) {
++                      const changes = {};
++                      for (const key of keys) {
++                        changes[key] = has(old, key) ? { oldValue: old[key], newValue: items[key] } : { newValue: items[key] };
++                      }
++                      notifyChanged(areaName, changes);
++                    }
++                    return result;
++                  })(),
++                  callback
++                ),
++                remove: (keys, callback) => callbackify(
++                  (async () => {
++                    const keyList = Array.isArray(keys) ? keys : [keys];
++                    const old = await readOld(keyList);
++                    const result = await area.remove(keys);
++                    const changes = {};
++                    for (const key of keyList) {
++                      if (has(old, key)) changes[key] = { oldValue: old[key] };
++                    }
++                    if (Object.keys(changes).length > 0) notifyChanged(areaName, changes);
++                    return result;
++                  })(),
++                  callback
++                ),
++                clear: (callback) => callbackify(
++                  (async () => {
++                    const old = await readOld(null);
++                    const result = await area.clear();
++                    const changes = {};
++                    for (const key of Object.keys(old)) {
++                      changes[key] = { oldValue: old[key] };
++                    }
++                    if (Object.keys(changes).length > 0) notifyChanged(areaName, changes);
++                    return result;
++                  })(),
++                  callback
++                ),
++                onChanged
++              };
++              // Delegate every remaining native member with the StorageArea
++              // as receiver. Copying the raw functions (Object.assign/spread)
++              // breaks them: Chromium throws "Illegal invocation: Function
++              // must be called on an object of type StorageArea" (getKeys,
++              // getBytesInUse, setAccessLevel, future additions).
++              for (const key in area) {
++                if (key in wrapped) continue;
++                const value = area[key];
++                if (typeof value === "function") {
++                  wrapped[key] = (...args) => area[key](...args);
++                } else {
++                  Object.defineProperty(wrapped, key, {
++                    enumerable: true,
++                    get: () => area[key]
++                  });
++                }
++              }
++              return wrapped;
++            };
+             const local = base && base.local;
+             return {
+               ...base,
++              local: wrapArea(local, "local"),
++              session: wrapArea(base && base.session, "session"),
+               // TODO: provide a backend for browsers to opt-in to
+-              managed: local,
+-              sync: local
++              managed: wrapArea(local, "managed"),
++              sync: wrapArea(local, "sync"),
++              onChanged: globalOnChanged
+             };
+           }
+         },
+diff --git a/node_modules/electron-chrome-extensions/dist/cjs/browser-action.js b/node_modules/electron-chrome-extensions/dist/cjs/browser-action.js
+index c20b7dc..8a3d880 100644
+--- a/node_modules/electron-chrome-extensions/dist/cjs/browser-action.js
++++ b/node_modules/electron-chrome-extensions/dist/cjs/browser-action.js
+@@ -213,7 +213,11 @@ var injectBrowserAction = () => {
+         const action = browserAction.getAction(this.id);
+         const activeTabId = this.tab;
+         const tabInfo = activeTabId > -1 ? action.tabs[activeTabId] : {};
+-        const info = { ...tabInfo, ...action };
++        // PATCH(voksa): tab-specific state must override the global action
++        // (Chrome semantics). The original spread order masked per-tab
++        // setIcon/setBadgeText, freezing the icon cache-buster (t=) so
++        // per-tab icon updates never became visible.
++        const info = { ...action, ...tabInfo };
+         this.title = typeof info.title === "string" ? info.title : "";
+         this.updateIcon(info);
+         if (info.text) {
+diff --git a/node_modules/electron-chrome-extensions/dist/cjs/index.js b/node_modules/electron-chrome-extensions/dist/cjs/index.js
+index b4242b0..4511312 100644
+--- a/node_modules/electron-chrome-extensions/dist/cjs/index.js
++++ b/node_modules/electron-chrome-extensions/dist/cjs/index.js
+@@ -2383,6 +2383,20 @@ var ExtensionRouter = class {
+         }
+       }
+     );
++    // PATCH(voksa): Electron never dispatches chrome.storage.onChanged (any
++    // area), which silently freezes extensions whose contexts sync through
++    // storage events (e.g. Bitwarden's auth status). The preload wraps the
++    // storage writes and reports the computed changes here; rebroadcast to
++    // every context of that extension (Chrome fires it in the writer too).
++    this.handle("storage.changed", async (event, areaName, changes) => {
++      const validAreas = ["local", "session", "sync", "managed"];
++      if (!validAreas.includes(areaName)) return;
++      if (!changes || typeof changes !== "object") return;
++      const extensionId = event.extension && event.extension.id;
++      if (!extensionId) return;
++      this.sendEvent(extensionId, "storage.onChanged", changes, areaName);
++      this.sendEvent(extensionId, `storage.${areaName}.onChanged`, changes);
++    });
+   }
+   filterListeners(predicate) {
+     for (const [eventName, listeners] of this.listeners) {
+diff --git a/node_modules/electron-chrome-extensions/dist/esm/browser-action.mjs b/node_modules/electron-chrome-extensions/dist/esm/browser-action.mjs
+index cc2e3ec..89720e0 100644
+--- a/node_modules/electron-chrome-extensions/dist/esm/browser-action.mjs
++++ b/node_modules/electron-chrome-extensions/dist/esm/browser-action.mjs
+@@ -189,7 +189,11 @@ var injectBrowserAction = () => {
+         const action = browserAction.getAction(this.id);
+         const activeTabId = this.tab;
+         const tabInfo = activeTabId > -1 ? action.tabs[activeTabId] : {};
+-        const info = { ...tabInfo, ...action };
++        // PATCH(voksa): tab-specific state must override the global action
++        // (Chrome semantics). The original spread order masked per-tab
++        // setIcon/setBadgeText, freezing the icon cache-buster (t=) so
++        // per-tab icon updates never became visible.
++        const info = { ...action, ...tabInfo };
+         this.title = typeof info.title === "string" ? info.title : "";
+         this.updateIcon(info);
+         if (info.text) {
+diff --git a/node_modules/electron-chrome-extensions/dist/esm/index.mjs b/node_modules/electron-chrome-extensions/dist/esm/index.mjs
+index dc598ce..c9f250b 100644
+--- a/node_modules/electron-chrome-extensions/dist/esm/index.mjs
++++ b/node_modules/electron-chrome-extensions/dist/esm/index.mjs
+@@ -2346,6 +2346,20 @@ var ExtensionRouter = class {
+         }
+       }
+     );
++    // PATCH(voksa): Electron never dispatches chrome.storage.onChanged (any
++    // area), which silently freezes extensions whose contexts sync through
++    // storage events (e.g. Bitwarden's auth status). The preload wraps the
++    // storage writes and reports the computed changes here; rebroadcast to
++    // every context of that extension (Chrome fires it in the writer too).
++    this.handle("storage.changed", async (event, areaName, changes) => {
++      const validAreas = ["local", "session", "sync", "managed"];
++      if (!validAreas.includes(areaName)) return;
++      if (!changes || typeof changes !== "object") return;
++      const extensionId = event.extension && event.extension.id;
++      if (!extensionId) return;
++      this.sendEvent(extensionId, "storage.onChanged", changes, areaName);
++      this.sendEvent(extensionId, `storage.${areaName}.onChanged`, changes);
++    });
+   }
+   filterListeners(predicate) {
+     for (const [eventName, listeners] of this.listeners) {

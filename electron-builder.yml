@@ -1,0 +1,130 @@
+appId: com.voksa.app
+productName: Voksa
+copyright: Copyright (c) 2026 Voksa
+asar: true
+compression: normal
+
+# Electron fuses (baked into the packaged binary). runAsNode MUST stay off:
+# with it on, a machine-wide ELECTRON_RUN_AS_NODE=1 env var (present on some
+# dev machines) makes the installed browser start as a bare Node process and
+# die instantly. The other two close the equivalent NODE_OPTIONS / --inspect
+# injection vectors. DevTools (F12) are unaffected; they're a Chromium
+# feature, not a Node one.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+
+directories:
+  output: build
+  buildResources: resources
+
+files:
+  - dist-electron/**/*
+  - dist-ui/**/*
+  - package.json
+  # Runtime window icon (Linux has no embedded exe/bundle icon: the
+  # BaseWindow needs a real PNG at runtime, resolved by resolveWindowIcon).
+  - resources/icon.png
+  # electron-chrome-web-store ships a preload script that MUST be reachable
+  # at runtime via `require.resolve`. Same goes for electron-chrome-extensions.
+  # electron-builder normally auto-includes all `dependencies` from
+  # package.json, but being explicit here avoids surprises if the default
+  # pruning logic ever changes.
+  - node_modules/electron-chrome-web-store/**/*
+  - node_modules/electron-chrome-extensions/**/*
+  - "!node_modules/**/test/**"
+  - "!node_modules/**/tests/**"
+  - "!node_modules/**/*.md"
+  - "!node_modules/**/*.map"
+
+asarUnpack:
+  # Only the native binding + its loader need to live outside the asar, not
+  # the 10MB of SQLite source tarballs under deps/ and src/.
+  - "**/node_modules/better-sqlite3/build/Release/*.node"
+  - "**/node_modules/better-sqlite3/lib/**/*"
+  - "**/node_modules/better-sqlite3/package.json"
+  # The preload scripts must NOT be inside the asar archive because the
+  # libraries read them via fs and Electron's preload loader can't read
+  # from asar on some platforms.
+  - "**/node_modules/electron-chrome-web-store/dist/*.preload.js"
+  - "**/node_modules/electron-chrome-extensions/dist/**/*.preload.js"
+
+# Single-source icon: electron-builder converts resources/icon.png
+# (1024x1024) to the required .ico / .icns formats automatically at
+# package time. No manual conversion step needed; see resources/README.md.
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: resources/icon.png
+
+nsis:
+  oneClick: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Voksa
+
+mac:
+  target:
+    # zip is REQUIRED for electron-updater on macOS (it updates from the zip,
+    # the dmg is only the human-facing installer).
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  # Per-arch suffix so the x64 and arm64 artifacts of one version never
+  # collide inside the same GitHub release.
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  category: public.app-category.productivity
+  icon: resources/icon.png
+  # Signing + notarization (CI provides CSC_LINK / CSC_KEY_PASSWORD and
+  # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID; without those
+  # env vars electron-builder skips both steps, so local dev builds still
+  # work unsigned). Hardened runtime is mandatory for notarization.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
+  notarize: true
+  # LaunchServices only delivers open-url events and honors
+  # setAsDefaultProtocolClient if the bundle statically declares the schemes.
+  extendInfo:
+    CFBundleURLTypes:
+      - CFBundleURLName: Voksa URL
+        CFBundleURLSchemes:
+          - http
+          - https
+    # getUserMedia (a browser feature) needs the usage strings, plus the
+    # matching hardened-runtime entitlements in entitlements.mac.plist.
+    NSMicrophoneUsageDescription: Voksa a besoin du micro pour les sites qui utilisent la capture audio (visioconference, dictee).
+    NSCameraUsageDescription: Voksa a besoin de la camera pour les sites qui utilisent la video (visioconference).
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Network
+  icon: resources/icon.png
+  maintainer: Voksa <contact@voksa.app>
+  # package.json `description` is kept to just "Voksa" on purpose: on Windows
+  # it becomes the exe's FileDescription, which the Task Manager displays for
+  # EVERY Chromium child process. The long-form description lives here for
+  # the .deb metadata instead.
+  description: Navigateur Chromium avec Mode Stream (protection anti-fuite pour le streaming et le partage d'ecran)
+
+# GitHub Releases. Owner/repo come from package.json `repository`. releaseType
+# draft = CI uploads everything into a DRAFT release; nothing reaches users
+# (site or auto-updater) until a maintainer clicks Publish. That click is the
+# manual release gate.
+publish:
+  provider: github
+  releaseType: draft

@@ -1,0 +1,55 @@
+name: Bug report
+description: Something is broken in Voksa
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Voksa version
+      description: Visible in Settings, "About" section.
+      placeholder: 0.2.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Click ...
+        3. See ...
+    validations:
+      required: true
+  - type: dropdown
+    id: stream
+    attributes:
+      label: Was Stream Mode active?
+      description: Stream Mode bugs are treated with the highest priority, especially anything that leaks masked information on screen.
+      options:
+        - 'No'
+        - 'Yes'
+        - 'Yes, and sensitive information leaked on screen'
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console output / screenshots
+      description: Anything from the terminal (dev) or screenshots. Redact anything private.

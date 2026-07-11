@@ -1,12 +1,13 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { app, BaseWindow, WebContentsView, screen, session as electronSession } from 'electron';
+import { app, BaseWindow, WebContentsView, screen } from 'electron';
 import { TabManager } from './tabs/TabManager';
 import { computeChromeViewBounds } from './tabs/bounds';
 import { CurtainController, type OverlayController } from './stream-mode/curtain';
 import { StatusViewController } from './statusView';
-import { setupChromeWebStore } from './extensions/webstore';
-import { loadSession } from './storage/session';
+import { PageMenuController } from './pageContextMenu';
+import { PrintController } from './printing';
+import type { SessionWindow } from './storage/session';
 import type { ChromeBounds } from '../shared/types';
 
 export type AppWindow = {
@@ -15,10 +16,16 @@ export type AppWindow = {
   tabs: TabManager;
   curtain: CurtainController;
   statusView: StatusViewController;
+  pageMenu: PageMenuController;
+  printing: PrintController;
   updateChromeBounds: (bounds: ChromeBounds) => void;
   setOverlayMode: (open: boolean) => void;
-  /** Load the chrome UI + restore the session. Call AFTER registerIpcHandlers. */
-  bootstrap: () => Promise<void>;
+  /**
+   * Load the chrome UI, then restore the given session window (or open
+   * `initialUrl` / a fresh tab). Call AFTER registerIpcHandlers: the page
+   * preload reads the stream config synchronously at document-start.
+   */
+  bootstrap: (restore: SessionWindow | null, initialUrl?: string) => Promise<void>;
 };
 
 /**
@@ -33,7 +40,7 @@ function resolveWindowIcon(): string | undefined {
 }
 
 /** Clamp restored window bounds to a currently-connected display. */
-function boundsAreVisible(bounds: { x: number; y: number; width: number; height: number }): boolean {
+export function boundsAreVisible(bounds: { x: number; y: number; width: number; height: number }): boolean {
   try {
     const displays = screen.getAllDisplays();
     return displays.some((d) => {
@@ -63,8 +70,6 @@ export async function createAppWindow(userAgent: string): Promise<AppWindow> {
     icon: resolveWindowIcon(),
     show: false,
   });
-
-  const chromeSession = electronSession.defaultSession;
 
   const chromeView = new WebContentsView({
     webPreferences: {
@@ -141,7 +146,21 @@ export async function createAppWindow(userAgent: string): Promise<AppWindow> {
   const tabs = new TabManager(window, userAgent, curtain);
   tabs.setChromeBounds(currentChromeBounds);
 
-  await setupChromeWebStore(chromeSession, window, tabs);
+  // Window-owned controllers: page context menus paint in THIS window's
+  // chromeView, print targets resolve through THIS window's tabs.
+  const pageMenu = new PageMenuController(chromeView, tabs);
+  tabs.on(
+    'page-context-menu',
+    (p: {
+      wc: Electron.WebContents;
+      params: Electron.ContextMenuParams;
+      windowX: number;
+      windowY: number;
+    }) => {
+      pageMenu.show(p.wc, p.params, p.windowX, p.windowY);
+    },
+  );
+  const printing = new PrintController(tabs);
 
   const updateChromeBounds = (bounds: ChromeBounds) => {
     currentChromeBounds = bounds;
@@ -155,7 +174,17 @@ export async function createAppWindow(userAgent: string): Promise<AppWindow> {
   });
   window.on('enter-full-screen', applyChromeBounds);
   window.on('leave-full-screen', applyChromeBounds);
-  window.on('closed', () => statusView.destroy());
+  window.on('closed', () => {
+    statusView.destroy();
+    // A BaseWindow does not destroy its child views' webContents on close:
+    // without this, a closed window's chrome UI would keep living (and its
+    // CDP target with it) until the whole app quits.
+    try {
+      chromeView.webContents.close();
+    } catch {
+      // already gone
+    }
+  });
 
   tabs.on('active-tab-changed', () => {
     // Keep [tabs, statusView, chromeView]: re-stack the status bubble first
@@ -180,11 +209,10 @@ export async function createAppWindow(userAgent: string): Promise<AppWindow> {
     statusView.setSuspended(on);
   });
 
-  const bootstrap = async () => {
+  const bootstrap = async (restore: SessionWindow | null, initialUrl?: string) => {
     // Restore window geometry before the first paint to avoid a resize flash.
-    const session = loadSession();
-    if (session?.windowBounds && boundsAreVisible(session.windowBounds)) {
-      window.setBounds(session.windowBounds);
+    if (restore?.windowBounds && boundsAreVisible(restore.windowBounds)) {
+      window.setBounds(restore.windowBounds);
     }
 
     const devServer = process.env.VITE_DEV_SERVER;
@@ -198,12 +226,12 @@ export async function createAppWindow(userAgent: string): Promise<AppWindow> {
       );
     }
 
-    if (session?.maximized) window.maximize();
+    if (restore?.maximized) window.maximize();
     window.show();
 
-    // Restore tabs (lazy) or open a fresh one.
-    const restored = session ? tabs.restore(session) : false;
-    if (!restored) tabs.create();
+    // Restore tabs (lazy) or open the requested URL / a fresh one.
+    const restored = restore ? tabs.restore(restore) : false;
+    if (!restored) tabs.create(initialUrl);
   };
 
   return {
@@ -212,6 +240,8 @@ export async function createAppWindow(userAgent: string): Promise<AppWindow> {
     tabs,
     curtain,
     statusView,
+    pageMenu,
+    printing,
     updateChromeBounds,
     setOverlayMode,
     bootstrap,

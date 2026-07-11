@@ -27,7 +27,10 @@
 //      masked AND visible (anti-vacuity). Asserted on BOTH paths into Stream
 //      Mode: the page loaded with it already on, and it toggled on over a page
 //      already painted raw. Toggling Stream OFF must ungate and restore both.
-//  11. NO RENDERER EXCEPTIONS: no Runtime.exceptionThrown on the chrome UI
+//  11. MULTI-WINDOW: voksa.window.openNew() boots a second chrome UI whose
+//      tab list is isolated from window 1 in both directions; closing it
+//      tears its target down and leaves window 1 intact.
+//  12. NO RENDERER EXCEPTIONS: no Runtime.exceptionThrown on the chrome UI
 //      target during the whole run.
 //
 // Catches boot crashes, preload failures, a blank chrome UI, a broken voksa
@@ -874,7 +877,79 @@ async function main() {
   await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
   pass('STREAM GUARDS PRELOAD-LESS FRAME');
 
-  // --- 11. NO RENDERER EXCEPTIONS -------------------------------------------------
+  // --- 11. MULTI-WINDOW ------------------------------------------------------
+  // A second browser window opened from the first (voksa.window.openNew) must
+  // boot its own chrome UI, keep its tab list fully isolated from window 1,
+  // and die cleanly when closed: its chrome UI target disappears while
+  // window 1 keeps working.
+  const chromeUiTargets = async () =>
+    (await listTargets()).filter(
+      (t) => t.type === 'page' && t.url.includes('index.html') && t.url.includes('chrome=1'),
+    );
+
+  const w1TabsBefore = (await ui.evaluate(`window.voksa.tabs.list()`)).length;
+  await ui.evaluate(`window.voksa.window.openNew()`);
+  await waitFor(
+    'second chrome UI target',
+    async () => (await chromeUiTargets()).length >= 2,
+    STEP_TIMEOUT_MS,
+    'voksa.window.openNew() produced no second chrome UI; check the WINDOW_NEW handler and the window factory wiring in src/main/index.ts',
+  );
+  const secondTarget = (await chromeUiTargets()).find((t) => t.id !== uiTarget.id);
+  if (!secondTarget) {
+    throw new Error('two chrome UI targets reported but none differs from window 1');
+  }
+  const ui2 = await CdpClient.connect(secondTarget.webSocketDebuggerUrl, 'second chrome UI');
+  clients.push(ui2);
+
+  await waitFor(
+    'second window UI alive with its own fresh tab',
+    async () => {
+      const s = await ui2.evaluate(`({
+        voksa: typeof window.voksa,
+        tabs: typeof window.voksa === 'object' ? (window.voksa.tabs ? -2 : -3) : -4,
+      })`);
+      if (s.voksa !== 'object') return false;
+      const list = await ui2.evaluate(`window.voksa.tabs.list()`);
+      return Array.isArray(list) && list.length === 1;
+    },
+    STEP_TIMEOUT_MS,
+    'window 2 chrome UI never exposed voksa with exactly one fresh tab; per-sender IPC routing in src/main/ipc/handlers.ts likely serves the wrong TabManager',
+  );
+
+  // Isolation, both directions: creating a tab in window 2 must not touch
+  // window 1's list, and window 1's count must have survived the new window.
+  await ui2.evaluate(`window.voksa.tabs.create('voksa://settings')`);
+  await waitFor(
+    'tab created in window 2 stays in window 2',
+    async () => (await ui2.evaluate(`window.voksa.tabs.list()`)).length === 2,
+    STEP_TIMEOUT_MS,
+  );
+  const w1TabsAfter = (await ui.evaluate(`window.voksa.tabs.list()`)).length;
+  if (w1TabsAfter !== w1TabsBefore) {
+    throw new Error(
+      `window 1 tab count changed from ${w1TabsBefore} to ${w1TabsAfter} while acting on window 2: tab isolation broken`,
+    );
+  }
+
+  // Close window 2 from its own chrome UI (deferred so the CDP reply gets
+  // out before the target dies), then window 1 must still answer.
+  await ui2.evaluate(`(setTimeout(() => window.voksa.window.close(), 50), true)`);
+  await waitFor(
+    'second window torn down',
+    async () => (await chromeUiTargets()).length === 1,
+    STEP_TIMEOUT_MS,
+    'window 2 chrome UI target survived voksa.window.close(); check WINDOW_CLOSE sender routing',
+  );
+  const w1Alive = (await ui.evaluate(`window.voksa.tabs.list()`)).length;
+  if (w1Alive !== w1TabsBefore) {
+    throw new Error(
+      `window 1 lost tabs when window 2 closed (${w1TabsBefore} -> ${w1Alive}); per-window teardown leaked across windows`,
+    );
+  }
+  pass('MULTI-WINDOW');
+
+  // --- 12. NO RENDERER EXCEPTIONS -------------------------------------------------
   if (uiExceptions.length > 0) {
     throw new Error(
       `chrome UI threw ${uiExceptions.length} uncaught exception(s) during the run:\n${uiExceptions.join('\n')}`,

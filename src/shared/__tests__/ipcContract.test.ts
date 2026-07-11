@@ -170,7 +170,21 @@ const SUBSCRIBE_RE = /\bon(?:<(?:[^<>]|<[^<>]*>)*>)?\s*\(\s*IPC\.([A-Z0-9_]+)/g;
 const mainHandles = scan(mainFiles, /ipcMain\.handle\s*\(\s*IPC\.([A-Z0-9_]+)/g);
 const mainOns = scan(mainFiles, /ipcMain\.on\s*\(\s*IPC\.([A-Z0-9_]+)/g);
 // Main-to-renderer pushes: chromeView.webContents.send, frame.send, wc.send...
-const mainSends = scan(mainFiles, /\.send\s*\(\s*IPC\.([A-Z0-9_]+)/g);
+const mainRawSends = scan(mainFiles, /\.send\s*\(\s*IPC\.([A-Z0-9_]+)/g);
+// Multi-window routed pushes (handlers.ts wraps webContents.send so every
+// push is destroyed-guarded and window-routed): sendToChrome(win, IPC.X, ...)
+// targets one window's chromeView, broadcastToChromes(IPC.X, ...) all of them.
+const mainRoutedSends = scan(
+  mainFiles,
+  /\b(?:sendToChrome\s*\(\s*[\w$.]+\s*,|broadcastToChromes\s*\()\s*IPC\.([A-Z0-9_]+)/g,
+);
+const mainSends: Usage = new Map(
+  [...mainRawSends, ...mainRoutedSends].reduce((acc, [key, files]) => {
+    const merged = acc.get(key) ?? new Set<string>();
+    for (const f of files) merged.add(f);
+    return acc.set(key, merged);
+  }, new Map<string, Set<string>>()),
+);
 // Frame-targeted pushes (frame.send over mainFrame.framesInSubtree): the only
 // delivery that reaches SUBFRAME preloads; a webContents-level send reaches
 // the main frame alone. The receiver must end in "frame"/"Frame".
@@ -214,6 +228,7 @@ describe('IPC contract (static analysis of src/main + src/preload)', () => {
       mainHandles,
       mainOns,
       mainSends,
+      mainRoutedSends,
       mainFrameSends,
       preloadInvokes,
       preloadSends,

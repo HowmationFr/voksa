@@ -1,6 +1,11 @@
 import { BrowserWindow, dialog } from 'electron';
 import type { BaseWindow, ContextMenuParams, MenuItem, Session, WebContents } from 'electron';
-import type { TabManager } from '../tabs/TabManager';
+import {
+  focusedWindow,
+  openNewWindow,
+  windowById,
+  windowFromPageContents,
+} from '../windows';
 import { t } from '../i18n';
 
 /**
@@ -21,10 +26,12 @@ import { t } from '../i18n';
  * `persist:main`, the webstore page (which lives in a tab) has no access
  * to the chrome.* APIs and can't install anything.
  *
- * The chrome.tabs / chrome.windows surface is wired to the TabManager via
- * the callbacks below: setupChromeWebStore is therefore called AFTER the
- * TabManager exists (see window.ts), but still BEFORE any tab or the chrome
- * UI navigates, so both libraries' session preloads are registered in time.
+ * The chrome.tabs / chrome.windows surface resolves its target window through
+ * the live-window registry (src/main/windows.ts): the library passes a
+ * windowId (or we fall back to the focused window), so extensions work across
+ * every window. The library forbids two instances per session, so
+ * setupChromeWebStore runs ONCE at boot (index.ts), BEFORE any window is
+ * created, so both libraries' session preloads are registered in time.
  *
  * The `electron-chrome-extensions` library is dual-licensed (GPL-3.0 or
  * Patron). We go with `GPL-3.0` here since this project is personal/OSS;
@@ -43,7 +50,7 @@ let runtime: ExtensionsRuntime | null = null;
 // Loose local shapes for the chrome.* detail objects. The library types them
 // via @types/chrome, which we deliberately keep out of the main-process
 // tsconfig; method-parameter bivariance makes these narrower shapes valid.
-type TabCreateDetails = { url?: string; active?: boolean };
+type TabCreateDetails = { url?: string; active?: boolean; windowId?: number };
 type WindowCreateDetails = {
   url?: string | string[];
   type?: string;
@@ -52,11 +59,7 @@ type WindowCreateDetails = {
 };
 type PermissionsRequest = { permissions?: string[]; origins?: string[] };
 
-export async function setupChromeWebStore(
-  session: Session,
-  window: BaseWindow,
-  tabs: TabManager,
-): Promise<void> {
+export async function setupChromeWebStore(session: Session): Promise<void> {
   // 1. Chrome extension runtime (chrome.* APIs, popup host, action bar).
   try {
     const extMod = await import('electron-chrome-extensions');
@@ -77,19 +80,27 @@ export async function setupChromeWebStore(
         session,
         createTab: async (details: TabCreateDetails) => {
           // chrome.tabs.create: options pages, onboarding tabs, "open in
-          // new tab" actions. `active` defaults to true in Chrome.
-          const tab = tabs.create(details.url ?? 'voksa://newtab', {
+          // new tab" actions. `active` defaults to true in Chrome. The
+          // library fills windowId with its last-focused window when the
+          // extension did not name one.
+          const target =
+            (typeof details.windowId === 'number' ? windowById(details.windowId) : null) ??
+            focusedWindow();
+          if (!target) throw new Error('no window available for chrome.tabs.create');
+          const tab = target.tabs.create(details.url ?? 'voksa://newtab', {
             activate: details.active !== false,
           });
-          return [tab.view.webContents, window] as [WebContents, BaseWindow];
+          return [tab.view.webContents, target.window] as [WebContents, BaseWindow];
         },
         selectTab: (wc: WebContents) => {
-          const tab = tabs.findByWebContents(wc);
-          if (tab) tabs.setActive(tab.id);
+          const win = windowFromPageContents(wc);
+          const tab = win?.tabs.findByWebContents(wc);
+          if (win && tab) win.tabs.setActive(tab.id);
         },
         removeTab: (wc: WebContents) => {
-          const tab = tabs.findByWebContents(wc);
-          if (tab) tabs.close(tab.id);
+          const win = windowFromPageContents(wc);
+          const tab = win?.tabs.findByWebContents(wc);
+          if (win && tab) win.tabs.close(tab.id);
         },
         createWindow: async (details: WindowCreateDetails) => {
           const url = Array.isArray(details.url) ? details.url[0] : details.url;
@@ -112,13 +123,29 @@ export async function setupChromeWebStore(
             if (url) void popup.loadURL(url);
             return popup;
           }
-          // 'normal' windows: we're a single-window browser, so open a tab in
-          // the main window instead.
-          tabs.create(url ?? 'voksa://newtab');
-          return window;
+          // 'normal' windows: a real browser window now that Voksa supports
+          // several. Fall back to a tab if the factory is not wired yet.
+          const created = await openNewWindow(url ?? undefined);
+          if (created) return created.window;
+          const fallback = focusedWindow();
+          if (!fallback) throw new Error('no window available for chrome.windows.create');
+          fallback.tabs.create(url ?? 'voksa://newtab');
+          return fallback.window;
         },
         removeWindow: (win: BaseWindow) => {
-          if (win.id !== window.id && !win.isDestroyed()) win.destroy();
+          // The library also relays a window's own 'closed' event here: the
+          // BaseWindow may already be destroyed, and every getter (win.id
+          // included) throws on a destroyed window. Nothing left to close.
+          if (win.isDestroyed()) return;
+          // One of our browser windows: close() it gracefully so the session
+          // bookkeeping (Chrome-like forget-on-close) runs; library popups
+          // are not tracked by the registry and are simply destroyed.
+          const managed = windowById(win.id);
+          if (managed) {
+            managed.window.close();
+            return;
+          }
+          if (!win.isDestroyed()) win.destroy();
         },
         requestPermissions: async (
           extension: { name: string },
@@ -128,8 +155,9 @@ export async function setupChromeWebStore(
             ...(permissions.permissions ?? []),
             ...(permissions.origins ?? []),
           ];
-          const { response } = await dialog.showMessageBox(window, {
-            type: 'question',
+          const parent = focusedWindow()?.window;
+          const opts = {
+            type: 'question' as const,
             buttons: [t('Autoriser'), t('Refuser')],
             defaultId: 0,
             cancelId: 1,
@@ -137,7 +165,10 @@ export async function setupChromeWebStore(
               name: extension.name,
             }),
             detail: requested.join('\n'),
-          });
+          };
+          const { response } = parent
+            ? await dialog.showMessageBox(parent, opts)
+            : await dialog.showMessageBox(opts);
           return response === 0;
         },
       });

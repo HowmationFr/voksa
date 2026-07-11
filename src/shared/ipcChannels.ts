@@ -122,6 +122,7 @@ export const IPC = {
   APP_CLEAR_BROWSING_DATA: 'app:clearBrowsingData',
 
   // Window controls
+  WINDOW_NEW: 'window:new',
   WINDOW_MINIMIZE: 'window:minimize',
   WINDOW_MAXIMIZE: 'window:maximize',
   WINDOW_CLOSE: 'window:close',

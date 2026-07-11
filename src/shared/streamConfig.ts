@@ -1,3 +1,5 @@
+import { DEFAULT_STREAM_COLOR } from './streamColor';
+
 export type StreamModeConfig = {
   enabled: boolean;
   maskIPv4: boolean;
@@ -29,7 +31,45 @@ export type StreamModeConfig = {
    * project name, a client name, an internal service URL, etc.
    */
   customMasks: string[];
+  /**
+   * Accent color of every Stream Mode surface in the chrome UI (window ring,
+   * toolbar shield, badges): hex `#rrggbb`, the light and dark palettes are
+   * derived from it (see streamColor.ts). Purely cosmetic: it never changes
+   * what gets masked, and changing it must never re-gate iframes or re-sweep
+   * pages (see sameMaskingConfig below).
+   */
+  color: string;
 };
+
+/**
+ * Config fields the masking pipeline never reads. Kept as a deny-list so a
+ * FUTURE field is treated as mask-relevant by default (fail-closed): frames
+ * get re-pushed and coverage re-checked unless someone deliberately lists the
+ * field here.
+ */
+const COSMETIC_KEYS: ReadonlySet<string> = new Set(['color']);
+
+/**
+ * True when both configs agree on everything the masking pipeline reads
+ * (page maskers, frame guard, permissions, curtains). Used to skip the
+ * frame-config push and the frame-guard coverage invalidation on cosmetic
+ * changes: without it, dragging the color picker while live would hide every
+ * iframe for a beat on each step.
+ */
+export function sameMaskingConfig(a: StreamModeConfig, b: StreamModeConfig): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) {
+    if (COSMETIC_KEYS.has(key)) continue;
+    const va = (a as Record<string, unknown>)[key];
+    const vb = (b as Record<string, unknown>)[key];
+    if (Array.isArray(va) && Array.isArray(vb)) {
+      if (va.length !== vb.length || va.some((v, i) => v !== vb[i])) return false;
+    } else if (va !== vb) {
+      return false;
+    }
+  }
+  return true;
+}
 
 export const DEFAULT_STREAM_CONFIG: StreamModeConfig = {
   enabled: false,
@@ -47,6 +87,7 @@ export const DEFAULT_STREAM_CONFIG: StreamModeConfig = {
   hideHistory: true,
   autoStreamOnRecorder: true,
   customMasks: [],
+  color: DEFAULT_STREAM_COLOR,
 };
 
 export type StreamToggleKey = Exclude<keyof StreamModeConfig, 'enabled'>;

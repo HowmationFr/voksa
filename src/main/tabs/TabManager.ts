@@ -7,6 +7,7 @@ import type { SessionData, SessionTab } from '../storage/session';
 import { computeTabBounds } from './bounds';
 import { getSettings, setSettings } from '../storage/settings';
 import { normalizeInput } from '../../shared/urlUtils';
+import { sameMaskingConfig } from '../../shared/streamConfig';
 import { getStreamMode } from '../stream-mode/StreamModeController';
 import { CurtainController, isInternalUrl } from '../stream-mode/curtain';
 import { FrameGuard } from '../stream-mode/frameGuard';
@@ -59,10 +60,17 @@ export class TabManager extends EventEmitter {
     // entirely renderer-side: each tab's preload shrouds, sweeps synchronously,
     // and lifts within a single task: no screenshots, no shared-backdrop race.
     // Toggle-OFF must drop any curtains still up so tabs aren't stuck blanked.
+    let prevStreamCfg = getStreamMode().getConfig();
     getStreamMode().on('config-changed', (cfg) => {
+      const maskingChanged = !sameMaskingConfig(prevStreamCfg, cfg);
+      prevStreamCfg = cfg;
       if (!cfg.enabled) {
         for (const t of this.tabs) this.curtain.drop(t.id);
       }
+      // Cosmetic-only updates (accent color) must not reach the guards:
+      // invalidating coverage hides every subframe until the next verdict,
+      // which would make the color picker blink the live page on each step.
+      if (!maskingChanged) return;
       // Forwarded from here (one listener) rather than subscribed per guard:
       // a listener per tab would trip Node's max-listeners warning on the
       // controller singleton. Runs BEFORE the handlers.ts config broadcast, so

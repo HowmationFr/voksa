@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Camera,
   Check,
@@ -11,9 +11,12 @@ import {
   Mail,
   MapPin,
   Mic,
+  Palette,
   Phone,
+  Pipette,
   Plus,
   Radio,
+  RotateCcw,
   Server,
   Shield,
   Tag,
@@ -27,6 +30,12 @@ import { Toggle } from '../ui/Toggle';
 import { askConfirm } from '../ui/ConfirmDialog';
 import { useT } from '../../lib/i18n';
 import type { StreamModeConfig } from '../../../shared/streamConfig';
+import {
+  DEFAULT_STREAM_COLOR,
+  STREAM_COLOR_PRESETS,
+  deriveStreamPalette,
+  normalizeStreamColor,
+} from '../../../shared/streamColor';
 
 type MaskCard = {
   key: keyof StreamModeConfig;
@@ -192,6 +201,16 @@ export function StreamPage(): React.ReactElement {
         </div>
 
         <SectionTitle
+          icon={Palette}
+          title={t('Apparence')}
+          subtitle={t('La couleur qui signale le Mode Stream dans l’interface.')}
+        />
+        <StreamColorCard
+          color={config.color}
+          onChange={(hex) => void update({ color: hex })}
+        />
+
+        <SectionTitle
           icon={Tag}
           title={t('Mots-clés personnalisés')}
           subtitle={t('Masquez un nom de projet, un pseudo, une URL interne, n’importe quelle chaîne sensible.')}
@@ -235,7 +254,7 @@ function HeroHeader({
       <div className="relative flex items-center gap-5 p-6">
         <div
           className={`flex-shrink-0 flex items-center justify-center w-14 h-14 rounded-2xl transition-colors ${
-            enabled ? 'bg-stream text-white' : 'bg-accent/15 text-accent'
+            enabled ? 'bg-stream text-stream-fg' : 'bg-accent/15 text-accent'
           }`}
         >
           <Shield size={26} strokeWidth={2.2} />
@@ -246,7 +265,7 @@ function HeroHeader({
             <h1 className="text-[22px] font-semibold text-fg">{t('Mode Stream')}</h1>
             <span
               className={`inline-flex items-center gap-1 px-2 h-5 rounded-full text-[11px] font-medium ${
-                enabled ? 'bg-stream text-white' : 'bg-bg-hover text-fg-muted'
+                enabled ? 'bg-stream text-stream-fg' : 'bg-bg-hover text-fg-muted'
               }`}
             >
               {enabled ? <Check size={11} /> : null}
@@ -278,7 +297,7 @@ function HeroHeader({
           onClick={onToggle}
           className={`flex-shrink-0 px-5 h-11 rounded-xl font-semibold text-[13px] transition-all shadow-light ${
             enabled
-              ? 'bg-stream hover:bg-stream-active text-white'
+              ? 'bg-stream hover:bg-stream-active text-stream-fg'
               : 'bg-accent hover:bg-accent-hover text-white'
           }`}
         >
@@ -353,6 +372,145 @@ function MaskToggleCard({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function StreamColorCard({
+  color,
+  onChange,
+}: {
+  color: string;
+  onChange: (hex: string) => void;
+}): React.ReactElement {
+  const t = useT();
+  const applied = normalizeStreamColor(color) ?? DEFAULT_STREAM_COLOR;
+  // Local echo: the native picker fires continuously while dragging, and even
+  // a swatch click only lands in the store after an IPC round-trip. The card
+  // follows `draft` instantly and drops it once the store caught up.
+  const [draft, setDraft] = useState<string | null>(null);
+  const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The hex a debounce timer still owes to the store, plus a live onChange
+  // ref so the unmount flush below never calls a stale closure.
+  const pendingHex = useRef<string | null>(null);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  useEffect(() => {
+    if (draft !== null && draft === applied) setDraft(null);
+  }, [draft, applied]);
+  // Unmount with a commit still pending (tab switch or navigation inside the
+  // debounce window): flush it instead of dropping it, or the color the user
+  // last saw live would silently revert. Safe mid-unmount: onChange writes to
+  // the zustand store and IPC, never to this component's state.
+  useEffect(
+    () => () => {
+      if (commitTimer.current) {
+        clearTimeout(commitTimer.current);
+        commitTimer.current = null;
+      }
+      if (pendingHex.current !== null) {
+        onChangeRef.current(pendingHex.current);
+        pendingHex.current = null;
+      }
+    },
+    [],
+  );
+  const shown = draft ?? applied;
+
+  // Swatch clicks are authoritative: always send, even when the target equals
+  // the store echo. `applied` lags behind in-flight commits (async IPC round
+  // trip), so a quick "revert" click during that window would otherwise be
+  // silently dropped. main's update is idempotent and cosmetic-only changes
+  // are already kept out of the masking pipeline (sameMaskingConfig).
+  const pick = (hex: string) => {
+    if (commitTimer.current) {
+      clearTimeout(commitTimer.current);
+      commitTimer.current = null;
+    }
+    pendingHex.current = null;
+    setDraft(hex);
+    onChange(hex);
+  };
+  // Native picker path: trailing debounce, so the settings file and the
+  // chrome UI only see the last value of a drag, not every mouse move.
+  const pickFromPicker = (hex: string) => {
+    setDraft(hex);
+    pendingHex.current = hex;
+    if (commitTimer.current) clearTimeout(commitTimer.current);
+    commitTimer.current = setTimeout(() => {
+      commitTimer.current = null;
+      pendingHex.current = null;
+      onChange(hex);
+    }, 200);
+  };
+
+  // Same contrast rule as the real surfaces: check mark and pipette stay
+  // readable on any swatch color.
+  const fgOf = (hex: string): string =>
+    `rgb(${deriveStreamPalette(hex)?.light.fg ?? '255 255 255'})`;
+  const isCustom = !STREAM_COLOR_PRESETS.includes(shown);
+
+  return (
+    <div className="bg-bg-elevated border border-border rounded-xl p-4 mb-10">
+      <div className="flex flex-wrap items-center gap-2.5">
+        {/* Swatch backgrounds are data (the color being chosen), not theme
+            styling: inline style is the point here, not a token bypass. */}
+        {STREAM_COLOR_PRESETS.map((hex) => {
+          const selected = shown === hex;
+          return (
+            <button
+              key={hex}
+              type="button"
+              onClick={() => pick(hex)}
+              title={hex}
+              aria-label={t('Choisir cette couleur ({hex})', { hex })}
+              aria-pressed={selected}
+              className={`flex items-center justify-center w-8 h-8 rounded-full transition-transform hover:scale-110 ${
+                selected ? 'ring-2 ring-border-strong ring-offset-2 ring-offset-bg-elevated' : ''
+              }`}
+              style={{ background: hex }}
+            >
+              {selected && <Check size={13} strokeWidth={3} style={{ color: fgOf(hex) }} />}
+            </button>
+          );
+        })}
+
+        <div className="w-px h-6 bg-border mx-0.5" />
+
+        <label
+          title={t('Couleur personnalisée')}
+          className={`relative flex items-center justify-center w-8 h-8 rounded-full cursor-pointer transition-transform hover:scale-110 ${
+            isCustom ? 'ring-2 ring-border-strong ring-offset-2 ring-offset-bg-elevated' : ''
+          }`}
+          style={{ background: shown }}
+        >
+          <input
+            type="color"
+            value={shown}
+            onChange={(e) => pickFromPicker(e.target.value)}
+            aria-label={t('Couleur personnalisée')}
+            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+          />
+          <Pipette size={13} style={{ color: fgOf(shown) }} />
+        </label>
+        <span className="font-mono text-[11px] text-fg-muted uppercase">{shown}</span>
+
+        <div className="flex-1" />
+
+        {shown !== DEFAULT_STREAM_COLOR && (
+          <button
+            type="button"
+            onClick={() => pick(DEFAULT_STREAM_COLOR)}
+            className="inline-flex items-center gap-1.5 px-3 h-8 rounded-lg text-[12px] text-fg-muted hover:text-fg hover:bg-bg-hover transition-colors"
+          >
+            <RotateCcw size={12} />
+            {t('Réinitialiser')}
+          </button>
+        )}
+      </div>
+      <p className="mt-3 text-[11px] text-fg-muted leading-snug">
+        {t('Appliquée en direct au liseré de fenêtre, au bouclier de la barre d’outils et à tous les indicateurs du Mode Stream, en thème clair comme en thème sombre.')}
+      </p>
     </div>
   );
 }

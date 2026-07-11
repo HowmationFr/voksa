@@ -5,6 +5,9 @@
  */
 export const enMenus: Record<string, string> = {
   // Menu/Menu.tsx
+  // Same key as the native menu item (en/main.ts, which wins the merge):
+  // both must carry the same value or one silently shadows the other.
+  'Nouvelle fenêtre': 'New window',
   'Historique': 'History',
   'Téléchargements': 'Downloads',
   'Favoris': 'Bookmarks',

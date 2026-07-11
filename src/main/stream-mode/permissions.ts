@@ -13,7 +13,14 @@ export type PermissionDeps = {
   isChromeContents: (wc: WebContents | null) => boolean;
   getRemembered: (origin: string, permission: string) => PermissionDecision | undefined;
   remember: (origin: string, permission: string, decision: PermissionDecision) => void;
-  promptUser: (req: PermissionRequest) => Promise<{ allow: boolean; remember: boolean }>;
+  /**
+   * Ask the user. The requesting webContents is passed alongside so the
+   * prompt can be routed to the window that actually hosts the page.
+   */
+  promptUser: (
+    req: PermissionRequest,
+    requester: WebContents | null,
+  ) => Promise<{ allow: boolean; remember: boolean }>;
 };
 
 // Hard-denied whenever Stream Mode is ON (a streamer must never leak these).
@@ -97,7 +104,7 @@ export function installPermissionHandlers(session: Session, deps: PermissionDeps
       return;
     }
     void deps
-      .promptUser({ origin, permission })
+      .promptUser({ origin, permission }, wc)
       .then((res) => {
         if (res.remember && origin) {
           deps.remember(origin, permission, res.allow ? 'allow' : 'deny');

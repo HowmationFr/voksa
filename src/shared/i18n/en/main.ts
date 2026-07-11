@@ -7,6 +7,7 @@ export const enMain: Record<string, string> = {
   // Application menu (menu.ts)
   'Fichier': 'File',
   'Nouvel onglet': 'New tab',
+  'Nouvelle fenêtre': 'New window',
   'Rouvrir l’onglet fermé': 'Reopen closed tab',
   'Fermer l’onglet': 'Close tab',
   'Imprimer…': 'Print…',

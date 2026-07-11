@@ -1,5 +1,6 @@
 import { Menu, MenuItemConstructorOptions, app, shell } from 'electron';
 import type { AppWindow } from './window';
+import { openNewWindow } from './windows';
 import { getStreamMode } from './stream-mode/StreamModeController';
 import { getSettings, setSettings } from './storage/settings';
 import { IPC } from '../shared/ipcChannels';
@@ -14,6 +15,10 @@ import { t } from './i18n';
  *
  * Labels go through t(): the menu is rebuilt by handlers.ts whenever the
  * language setting changes.
+ *
+ * Multi-window: `getApp` is injected as "the FOCUSED window" (index.ts wires
+ * it to the registry's focusedWindow), so every accelerator acts on the
+ * window the user is actually looking at.
  */
 export function buildApplicationMenu(getApp: () => AppWindow | null): Menu {
   const isMac = process.platform === 'darwin';
@@ -53,6 +58,11 @@ export function buildApplicationMenu(getApp: () => AppWindow | null): Menu {
       label: t('Fichier'),
       submenu: [
         { label: t('Nouvel onglet'), accelerator: 'CmdOrCtrl+T', click: () => tabs()?.create() },
+        {
+          label: t('Nouvelle fenêtre'),
+          accelerator: 'CmdOrCtrl+N',
+          click: () => void openNewWindow(),
+        },
         {
           label: t('Rouvrir l’onglet fermé'),
           accelerator: 'CmdOrCtrl+Shift+T',

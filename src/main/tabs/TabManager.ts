@@ -1,13 +1,13 @@
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { app, BaseWindow, type WebContents, type WebFrameMain } from 'electron';
+import { app, BaseWindow, webContents, type WebContents, type WebFrameMain } from 'electron';
 import { Tab } from './Tab';
 import type { ChromeBounds, TabState } from '../../shared/types';
-import type { SessionData, SessionTab } from '../storage/session';
+import type { SessionWindow, SessionTab } from '../storage/session';
 import { computeTabBounds } from './bounds';
 import { getSettings, setSettings } from '../storage/settings';
 import { normalizeInput } from '../../shared/urlUtils';
-import { sameMaskingConfig } from '../../shared/streamConfig';
+import { sameMaskingConfig, type StreamModeConfig } from '../../shared/streamConfig';
 import { getStreamMode } from '../stream-mode/StreamModeController';
 import { CurtainController, isInternalUrl } from '../stream-mode/curtain';
 import { FrameGuard } from '../stream-mode/frameGuard';
@@ -37,6 +37,8 @@ export class TabManager extends EventEmitter {
    * preload-less subframes (electron/electron#34727).
    */
   private readonly frameGuards = new Map<number, FrameGuard>();
+  /** Kept so dispose() can unsubscribe from the stream controller singleton. */
+  private readonly onStreamConfigChanged: (cfg: StreamModeConfig) => void;
 
   constructor(
     private readonly window: BaseWindow,
@@ -61,7 +63,7 @@ export class TabManager extends EventEmitter {
     // and lifts within a single task: no screenshots, no shared-backdrop race.
     // Toggle-OFF must drop any curtains still up so tabs aren't stuck blanked.
     let prevStreamCfg = getStreamMode().getConfig();
-    getStreamMode().on('config-changed', (cfg) => {
+    this.onStreamConfigChanged = (cfg) => {
       const maskingChanged = !sameMaskingConfig(prevStreamCfg, cfg);
       prevStreamCfg = cfg;
       if (!cfg.enabled) {
@@ -76,7 +78,67 @@ export class TabManager extends EventEmitter {
       // controller singleton. Runs BEFORE the handlers.ts config broadcast, so
       // the gate is raised before the renderers re-sweep.
       for (const guard of this.frameGuards.values()) guard.onConfigChanged();
-    });
+    };
+    getStreamMode().on('config-changed', this.onStreamConfigChanged);
+  }
+
+  /**
+   * Full teardown when the owning window is gone (index.ts wires it on
+   * 'closed'). Two distinct leaks are plugged here:
+   *  - the subscription on the stream controller singleton, or every closed
+   *    window would retain its whole TabManager through the closure and keep
+   *    dropping curtains against a destroyed chromeView;
+   *  - the tab webContents themselves: a BaseWindow does NOT destroy its
+   *    child WebContentsViews' webContents on close (unlike BrowserWindow),
+   *    so without this every closed window would leave its pages loaded,
+   *    playing audio and holding memory until the app quits.
+   */
+  dispose(): void {
+    getStreamMode().off('config-changed', this.onStreamConfigChanged);
+    const tabWebContentsIds = new Set(this.tabs.map((t) => t.view.webContents.id));
+    for (const tab of [...this.tabs]) {
+      try {
+        unregisterTabFromExtensions(tab.view.webContents);
+      } catch {
+        // ignore
+      }
+      tab.destroy();
+    }
+    this.tabs.length = 0;
+    this.activeId = null;
+    // Managed popups (window.open / OAuth) are independent BrowserWindows,
+    // guarded from HERE (they run the page preload). They cannot outlive this
+    // window: their opener tab is destroyed just above, so window.opener is
+    // dead and the flow is over anyway, while an orphaned guard would leave
+    // every iframe the popup inserts under Stream Mode gated forever (fails
+    // closed, but the popup would be visibly broken) since no window would
+    // own its frame messages any more.
+    for (const [wcId, guard] of this.frameGuards) {
+      if (!tabWebContentsIds.has(wcId)) {
+        const popup = webContents.fromId(wcId);
+        if (popup && !popup.isDestroyed()) {
+          try {
+            popup.close();
+          } catch {
+            // already going away
+          }
+        }
+      }
+      guard.dispose();
+    }
+    this.frameGuards.clear();
+  }
+
+  /**
+   * True when this manager owns the given webContents: one of its tabs, or a
+   * managed popup it guards (frame guards are keyed by webContents id and
+   * cover both). Used by the window registry to route page-originated IPC.
+   */
+  ownsWebContents(webContentsId: number): boolean {
+    return (
+      this.frameGuards.has(webContentsId) ||
+      this.tabs.some((t) => t.view.webContents.id === webContentsId)
+    );
   }
 
   private streamOn(): boolean {
@@ -384,7 +446,7 @@ export class TabManager extends EventEmitter {
 
   // --- Session persistence --------------------------------------------------
 
-  serialize(): SessionData {
+  serialize(): SessionWindow {
     const bounds = this.window.getBounds();
     const activeIndex = Math.max(
       0,
@@ -399,7 +461,7 @@ export class TabManager extends EventEmitter {
     };
   }
 
-  restore(data: SessionData): boolean {
+  restore(data: SessionWindow): boolean {
     const restorable = data.tabs.filter((t) => t.url && t.url.trim().length > 0);
     if (restorable.length === 0) return false;
     this.closedStack = Array.isArray(data.closedStack) ? data.closedStack.slice(-MAX_CLOSED) : [];

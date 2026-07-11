@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import {
+  AppWindow,
   BookOpen,
   Clock,
   Download,
@@ -51,6 +52,18 @@ export function Menu({ onClose, onOpenFind, onOpenPrint }: Props): React.ReactEl
         role="menu"
         className="fixed right-2 top-[86px] w-[288px] bg-bg-elevated border border-border rounded-2xl shadow-float z-50 animate-scale-in overflow-hidden p-1.5"
       >
+        <MenuItem
+          icon={AppWindow}
+          label={t('Nouvelle fenêtre')}
+          hint={shortcut('N')}
+          onClick={() => {
+            onClose();
+            void voksa.window.openNew();
+          }}
+        />
+
+        <Divider />
+
         <MenuItem icon={Clock} label={t('Historique')} hint={shortcut('H')} onClick={() => open('voksa://history')} />
         <MenuItem
           icon={Download}

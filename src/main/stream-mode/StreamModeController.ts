@@ -15,6 +15,11 @@ export class StreamModeController extends EventEmitter {
 
   constructor() {
     super();
+    // One 'config-changed' listener per window (TabManager) plus the global
+    // broadcast in handlers.ts: with enough windows the default cap of 10
+    // would fire a spurious MaxListenersExceededWarning. Listeners are
+    // balanced: TabManager.dispose() unsubscribes when its window closes.
+    this.setMaxListeners(0);
     this.config = { ...DEFAULT_STREAM_CONFIG, ...getSettings().streamMode };
     this.internalHostname = os.hostname();
     this.applyCommandLineSwitches();

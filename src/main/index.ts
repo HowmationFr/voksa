@@ -1,15 +1,31 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { app, Menu, shell } from 'electron';
+import { app, Menu, session, shell } from 'electron';
 import { applyUserAgentOverride } from './ua';
-import { createAppWindow, type AppWindow } from './window';
-import { registerIpcHandlers } from './ipc/handlers';
+import { createAppWindow, boundsAreVisible, type AppWindow } from './window';
+import { registerIpcHandlers, wireWindowIpc } from './ipc/handlers';
 import { buildApplicationMenu } from './menu';
 import { getStreamMode } from './stream-mode/StreamModeController';
 import { RecorderWatcher } from './stream-mode/recorderWatcher';
+import { setupChromeWebStore } from './extensions/webstore';
+import {
+  focusedWindow,
+  registerWindow,
+  setWindowFactory,
+  unregisterWindow,
+  windowCount,
+} from './windows';
 import { closeDb } from './storage/db';
 import { flushSettings } from './storage/settings';
-import { saveSession, flushSession } from './storage/session';
+import {
+  loadSession,
+  updateWindowSnapshot,
+  removeWindowSnapshot,
+  flushSession,
+  beginRestore,
+  endRestore,
+  type SessionWindow,
+} from './storage/session';
 
 // Pin userData explicitly (a productName change must never orphan a profile)
 // and migrate profiles created under the pre-rename identities. Runs before
@@ -45,12 +61,35 @@ getStreamMode();
 // CRITICAL for Google login: must run before app.whenReady().
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 
+// The single-instance lock stays even with multi-window support: two
+// PROCESSES on one profile would fight over SQLite and the session file.
+// A second launch instead opens a new WINDOW in the running instance
+// (see 'second-instance' below).
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 }
 
-let appWindow: AppWindow | null = null;
+/**
+ * True from the moment the app decided to quit (menu quit, Cmd+Q, last
+ * window closed): windows closing during quit teardown must KEEP their
+ * session snapshot, so the whole set is restored at next boot. Only a
+ * window closed while OTHERS remain is forgotten (Chrome semantics).
+ */
+let quitting = false;
+
+/** Chrome UA string, resolved once at boot and shared by every window. */
+let chromeUA = '';
+
+/**
+ * Set once start() finished its app-global setup AND the first window(s)
+ * exist. Events that can fire BEFORE that (second-instance is delivered as
+ * soon as the lock is held, i.e. possibly before app.whenReady()) must wait:
+ * `new BaseWindow()` throws before 'ready', and a window created before
+ * setupChromeWebStore would load tabs without the extension session preloads.
+ */
+let booted = false;
+const pendingLaunchUrls: string[] = [];
 
 // Harden EVERY webContents at creation. Tab webContents get a richer handler
 // in TabManager.wireTab (which runs after this), so this is the default-deny
@@ -59,8 +98,9 @@ let appWindow: AppWindow | null = null;
 // navigate to untrusted schemes.
 app.on('web-contents-created', (_e, contents) => {
   contents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url) && appWindow) {
-      appWindow.tabs.create(url);
+    const target = focusedWindow();
+    if (/^https?:\/\//i.test(url) && target) {
+      target.tabs.create(url);
     } else if (/^https?:\/\//i.test(url)) {
       void shell.openExternal(url);
     }
@@ -82,10 +122,11 @@ function urlFromArgv(argv: string[]): string | null {
 }
 
 function wireSessionPersistence(win: AppWindow): void {
+  const id = win.window.id;
   // serialize() reads window bounds: never run it against a destroyed window
   // (tabs-changed still fires from the teardown relay in edge cases).
   const save = () => {
-    if (!win.window.isDestroyed()) saveSession(win.tabs.serialize());
+    if (!win.window.isDestroyed()) updateWindowSnapshot(id, win.tabs.serialize());
   };
   win.tabs.on('tabs-changed', save);
   win.window.on('resize', save);
@@ -93,30 +134,55 @@ function wireSessionPersistence(win: AppWindow): void {
   win.window.on('maximize', save);
   win.window.on('unmaximize', save);
   // Flush the freshest full snapshot the moment the window starts closing:
-  // the X-close path never reaches before-quit's flushSession (appWindow is
-  // nulled first), so a save debounced in the last 500ms would be lost, and
-  // during teardown TabManager deliberately stops emitting tabs-changed.
+  // the X-close path of the last window never reaches before-quit's
+  // flushSession in time for a save debounced in the last 500ms, and during
+  // teardown TabManager deliberately stops emitting tabs-changed.
   win.window.on('close', () => {
-    saveSession(win.tabs.serialize());
+    updateWindowSnapshot(id, win.tabs.serialize());
     flushSession();
+  });
+  win.window.on('closed', () => {
+    unregisterWindow(id);
+    // Balance the TabManager's subscription on the stream controller
+    // singleton, or every closed window would leak its whole tab manager.
+    win.tabs.dispose();
+    // Chrome semantics: closing ONE window among several forgets it; the
+    // LAST window (windowCount() is already 0 here) and quit-time teardown
+    // keep their snapshots for the next boot.
+    if (!quitting && windowCount() > 0) removeWindowSnapshot(id);
   });
 }
 
-async function createWindow(): Promise<void> {
-  const ua = applyUserAgentOverride();
-  const win = await createAppWindow(ua);
-  appWindow = win;
-  // Null the reference as soon as the window is gone. window-all-closed does
-  // it too, but that event does not fire while a popup (OAuth, extension)
-  // survives the main window: every consumer of appWindow (second-instance,
-  // open-url, menu accelerators) would then poke a destroyed BaseWindow.
-  win.window.on('closed', () => {
-    appWindow = null;
-  });
-  registerIpcHandlers(win);
-  Menu.setApplicationMenu(buildApplicationMenu(() => appWindow));
+/**
+ * Create, register and boot one browser window.
+ *  - `restore`: session entry to restore (boot path).
+ *  - `url`: single tab to open instead of the default new-tab (second
+ *    instance launch with a URL, chrome.windows.create, CLI link).
+ */
+async function createWindow(opts?: {
+  restore?: SessionWindow | null;
+  url?: string;
+}): Promise<AppWindow> {
+  // Resolved BEFORE registering the new window: cascade new windows from the
+  // currently focused one so they don't stack pixel-perfectly.
+  const previous = focusedWindow();
+  const win = await createAppWindow(chromeUA);
+  if (!opts?.restore && previous && !previous.window.isDestroyed()) {
+    try {
+      const b = previous.window.getBounds();
+      const cascaded = { x: b.x + 28, y: b.y + 28, width: b.width, height: b.height };
+      if (!previous.window.isMaximized() && boundsAreVisible(cascaded)) {
+        win.window.setBounds(cascaded);
+      }
+    } catch {
+      // cascade is cosmetic; never fatal
+    }
+  }
+  registerWindow(win);
+  wireWindowIpc(win);
   wireSessionPersistence(win);
-  await win.bootstrap();
+  await win.bootstrap(opts?.restore ?? null, opts?.url);
+  return win;
 }
 
 async function start() {
@@ -127,7 +193,39 @@ async function start() {
   } catch {
     // best-effort; not fatal
   }
-  await createWindow();
+
+  // App-global singletons, in dependency order and all BEFORE the first
+  // window: the UA webRequest hook and the extension runtime register
+  // session preloads, and registerIpcHandlers must expose
+  // STREAM_GET_CONFIG_SYNC before any tab document loads.
+  chromeUA = applyUserAgentOverride();
+  registerIpcHandlers();
+  await setupChromeWebStore(session.defaultSession);
+  setWindowFactory((url?: string) => createWindow({ url }));
+  Menu.setApplicationMenu(buildApplicationMenu(() => focusedWindow()));
+
+  // Restore every window of the previous run (v1 files migrate to one).
+  // Writes stay frozen until the whole set is back: the snapshot map fills
+  // one window at a time, so an intermediate write would erase the windows
+  // not yet booted. A window that fails to boot must not take the others
+  // down with it either: keep going, and guarantee at least one window.
+  const saved = loadSession();
+  beginRestore();
+  try {
+    if (saved && saved.windows.length > 0) {
+      for (const entry of saved.windows) {
+        try {
+          await createWindow({ restore: entry });
+        } catch (err) {
+          console.error('[main] window restore failed, skipping it:', err);
+        }
+      }
+    }
+    if (windowCount() === 0) await createWindow();
+  } finally {
+    endRestore();
+  }
+  booted = true;
   flushPendingOpenUrl();
 
   // Recorder detection: OBS & friends running (or launching later) flips
@@ -145,54 +243,74 @@ async function start() {
 }
 
 app.on('second-instance', (_e, argv) => {
-  if (appWindow?.window) {
-    if (appWindow.window.isMinimized()) appWindow.window.restore();
-    appWindow.window.focus();
-    const url = urlFromArgv(argv);
-    if (url) appWindow.tabs.create(url);
+  // A second Voksa launch = a new window in the running instance (Chrome
+  // behavior), with the OS-passed URL when there is one. Launches that land
+  // before boot completes are queued, never dropped and never allowed to
+  // build a window against a not-ready app.
+  const url = urlFromArgv(argv) ?? undefined;
+  if (!booted) {
+    pendingLaunchUrls.push(url ?? '');
+    return;
   }
+  openLaunchWindow(url);
 });
 
+/** New window for a launch request; failures are logged, never unhandled. */
+function openLaunchWindow(url?: string): void {
+  void createWindow({ url })
+    .then((win) => {
+      if (!win.window.isDestroyed()) win.window.focus();
+    })
+    .catch((err) => {
+      console.error('[main] could not open a window for the second launch:', err);
+    });
+}
+
 // macOS "open with default browser" / dock link clicks. The event can fire
-// BEFORE the window exists (cold start via a link click) or while the app is
-// alive without a window (darwin keeps running after window-all-closed);
-// buffer the URL instead of dropping it.
+// BEFORE the window exists (cold start via a link click); buffer the URL
+// instead of dropping it.
 let pendingOpenUrl: string | null = null;
 app.on('open-url', (event, url) => {
   event.preventDefault();
-  if (appWindow) appWindow.tabs.create(url);
+  const target = focusedWindow();
+  if (target) target.tabs.create(url);
   else pendingOpenUrl = url;
 });
 
 function flushPendingOpenUrl(): void {
-  if (pendingOpenUrl && appWindow) {
-    appWindow.tabs.create(pendingOpenUrl);
+  const target = focusedWindow();
+  if (pendingOpenUrl && target) {
+    target.tabs.create(pendingOpenUrl);
     pendingOpenUrl = null;
   }
+  // Second launches that arrived while the app was still booting: each one
+  // asked for its own window, and gets it now.
+  const queued = pendingLaunchUrls.splice(0, pendingLaunchUrls.length);
+  for (const url of queued) openLaunchWindow(url || undefined);
 }
 
 app.on('window-all-closed', () => {
-  // Quit on ALL platforms, macOS included. Recreating the window on
-  // 'activate' would rerun registerIpcHandlers, and every ipcMain.handle /
-  // singleton listener (stream controller, autoUpdater) would be registered
-  // twice: Electron throws on the first duplicated channel. Until handler
-  // registration is idempotent, the safe behavior is a clean quit; session
-  // restore brings the tabs back on next launch.
-  appWindow = null;
+  // Quit on ALL platforms, macOS included (existing single-window behavior,
+  // kept deliberately): the closing path of the last window preserved its
+  // session snapshot, so the next boot restores it.
   app.quit();
 });
 
 app.on('activate', () => {
-  // macOS Dock click while the window still exists: just focus it. The
-  // no-window case cannot happen anymore (window-all-closed quits).
-  if (appWindow?.window && !appWindow.window.isDestroyed()) {
-    appWindow.window.focus();
+  // macOS Dock click while windows exist: focus the last-focused one. The
+  // no-window case cannot happen (window-all-closed quits).
+  const target = focusedWindow();
+  if (target && !target.window.isDestroyed()) {
+    target.window.focus();
   }
 });
 
 app.on('before-quit', () => {
+  // From here on, closing windows is quit teardown: their session snapshots
+  // must survive so the whole set comes back at next boot.
+  quitting = true;
   try {
-    if (appWindow) flushSession();
+    flushSession();
   } catch {
     // ignore
   }

@@ -176,6 +176,8 @@ export function buildVoksaApi() {
         ipcRenderer.invoke(IPC.APP_CLEAR_BROWSING_DATA, opts),
     },
     window: {
+      /** Open a brand-new browser window (fresh tab, cascaded position). */
+      openNew: (): Promise<void> => ipcRenderer.invoke(IPC.WINDOW_NEW),
       minimize: () => ipcRenderer.invoke(IPC.WINDOW_MINIMIZE),
       maximize: () => ipcRenderer.invoke(IPC.WINDOW_MAXIMIZE),
       close: () => ipcRenderer.invoke(IPC.WINDOW_CLOSE),

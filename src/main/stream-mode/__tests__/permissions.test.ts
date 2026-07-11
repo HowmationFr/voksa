@@ -264,7 +264,9 @@ describe('installPermissionHandlers, Stream Mode OFF', () => {
     const probe = request('media', { requestingUrl: PAGE_URL, mediaTypes: ['video'] });
     // Nothing is granted before the user answers.
     expect(probe.granted).toBeUndefined();
-    expect(promptUser).toHaveBeenCalledWith({ origin: ORIGIN, permission: 'media' });
+    // Second argument: the requesting webContents (null in this harness),
+    // passed through so the prompt can be routed to the owning window.
+    expect(promptUser).toHaveBeenCalledWith({ origin: ORIGIN, permission: 'media' }, null);
 
     resolvePrompt({ allow: true, remember: false });
     await flushPromises();
@@ -302,10 +304,10 @@ describe('installPermissionHandlers, Stream Mode OFF', () => {
     const wc = { getURL: () => 'https://fallback.example/deep/path' } as unknown as WebContents;
     const probe = request('midi', undefined, wc);
     await flushPromises();
-    expect(promptUser).toHaveBeenCalledWith({
-      origin: 'https://fallback.example',
-      permission: 'midi',
-    });
+    expect(promptUser).toHaveBeenCalledWith(
+      { origin: 'https://fallback.example', permission: 'midi' },
+      wc,
+    );
     expect(probe.granted).toBe(true);
   });
 
@@ -316,7 +318,7 @@ describe('installPermissionHandlers, Stream Mode OFF', () => {
     });
     const probe = request('notifications', { requestingUrl: 'not-a-url' });
     await flushPromises();
-    expect(promptUser).toHaveBeenCalledWith({ origin: '', permission: 'notifications' });
+    expect(promptUser).toHaveBeenCalledWith({ origin: '', permission: 'notifications' }, null);
     expect(probe.granted).toBe(true);
     expect(remember).not.toHaveBeenCalled();
   });

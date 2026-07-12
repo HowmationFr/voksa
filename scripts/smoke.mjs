@@ -30,7 +30,16 @@
 //  11. MULTI-WINDOW: voksa.window.openNew() boots a second chrome UI whose
 //      tab list is isolated from window 1 in both directions; closing it
 //      tears its target down and leaves window 1 intact.
-//  12. NO RENDERER EXCEPTIONS: no Runtime.exceptionThrown on the chrome UI
+//  12. MEMORY SAVER: discarding a background tab destroys its renderer (its
+//      CDP page target disappears: the only real proof the memory came back)
+//      WITHOUT closing the tab, and re-activating it rebuilds the page with a
+//      back/forward history that actually walks.
+//  13. MEMORY SAVER REVIVE UNDER STREAM: reviving a dormant tab while Stream
+//      Mode is on must never paint the replayed page raw. The revive is watched
+//      frame by frame: a visible page still showing the probe email is a leak.
+//  14. ABOUT LOGO LOADS: the settings About card really decodes the product
+//      icon over file:// (a broken <img> there fails silently).
+//  15. NO RENDERER EXCEPTIONS: no Runtime.exceptionThrown on the chrome UI
 //      target during the whole run.
 //
 // Catches boot crashes, preload failures, a blank chrome UI, a broken voksa
@@ -949,7 +958,220 @@ async function main() {
   }
   pass('MULTI-WINDOW');
 
-  // --- 12. NO RENDERER EXCEPTIONS -------------------------------------------------
+  // --- 12. MEMORY SAVER: DISCARD FREES THE RENDERER, REVIVE KEEPS HISTORY -----
+  // Three things must hold, and each has a way of silently not holding:
+  //  (a) the discard REALLY destroys the renderer. Its CDP page target dying is
+  //      the only observable proof memory came back: a tab merely parked
+  //      off-screen (what an inactive tab is today) keeps its target.
+  //  (b) a discard is NOT a close. electron-chrome-extensions relays every
+  //      webContents destruction back into TabManager.close(), so a wrong
+  //      ordering in discard() closes the tab instead of freeing it.
+  //  (c) activating it brings the page back WITH its session history
+  //      (navigationHistory.getAllEntries -> restore), not just the URL.
+  const J = JSON.stringify;
+
+  const victimId = await ui.evaluate(`window.voksa.tabs.create(${J(pageUrl)})`);
+  // The first load must COMMIT before we navigate away, or the second
+  // navigation replaces it and the tab ends up with no back entry at all.
+  await waitFor(
+    'victim tab settled on page 1',
+    async () => {
+      const v = (await ui.evaluate(`window.voksa.tabs.list()`)).find((t) => t.id === victimId);
+      return v?.url === pageUrl && v?.isLoading === false;
+    },
+    STEP_TIMEOUT_MS,
+  );
+  await ui.evaluate(`window.voksa.tabs.navigate(${J(victimId)}, ${J(page2Url)})`);
+  // Anti-vacuity: the tab must really HAVE back history, or the assertion that
+  // it survives the discard would pass on an empty history.
+  await waitFor(
+    'victim has back history before the discard',
+    async () => {
+      const list = await ui.evaluate(`window.voksa.tabs.list()`);
+      const v = list.find((t) => t.id === victimId);
+      return v?.url === page2Url && v?.canGoBack === true;
+    },
+    STEP_TIMEOUT_MS,
+    'the victim tab never got a back entry: the history assertions below would be vacuous',
+  );
+
+  // The active tab is never discardable (by policy AND by discard() itself):
+  // move focus off the victim first.
+  const tabsBefore = await ui.evaluate(`window.voksa.tabs.list()`);
+  const otherId = tabsBefore.find((t) => t.id !== victimId)?.id;
+  if (!otherId) throw new Error('no second tab to focus: cannot test a background discard');
+  await ui.evaluate(`window.voksa.tabs.activate(${J(otherId)})`);
+
+  const discarded = await ui.evaluate(`window.voksa.tabs.discard(${J(victimId)})`);
+  if (discarded !== true) {
+    throw new Error(`voksa.tabs.discard returned ${J(discarded)}, expected true`);
+  }
+
+  // (a) THE RENDERER IS REALLY GONE.
+  await waitFor(
+    'discarded tab has no CDP page target left',
+    async () => !(await listTargets()).some((t) => t.type === 'page' && t.url === page2Url),
+    STEP_TIMEOUT_MS,
+    'the discarded tab still owns a live CDP page target: its webContents was not closed, so NO memory was freed (see TabManager.discard + teardownView in src/main/tabs/Tab.ts)',
+  );
+
+  // (b) A DISCARD IS NOT A CLOSE.
+  const tabsAfter = await ui.evaluate(`window.voksa.tabs.list()`);
+  const victim = tabsAfter.find((t) => t.id === victimId);
+  if (!victim) {
+    throw new Error(
+      'the discarded tab vanished from the tab strip: the electron-chrome-extensions destruction relay closed it. discard() must sever the tab from its webContents (detachView + frame guard dispose) BEFORE calling unregisterTabFromExtensions',
+    );
+  }
+  if (tabsAfter.length !== tabsBefore.length) {
+    throw new Error(
+      `tab count changed on discard (${tabsBefore.length} -> ${tabsAfter.length}): freeing memory must not close anything`,
+    );
+  }
+  if (victim.isDiscarded !== true) throw new Error('TabState.isDiscarded is not true after a discard');
+  if (victim.url !== page2Url) throw new Error(`the discarded tab lost its url: ${victim.url}`);
+  if (victim.canGoBack !== true) throw new Error('the discarded tab lost its back history in TabState');
+
+  // (c) REVIVE: same document, and a history that is actually navigable.
+  await ui.evaluate(`window.voksa.tabs.activate(${J(victimId)})`);
+  const revivedTarget = await waitFor(
+    'revived page CDP target',
+    async () => (await listTargets()).find((t) => t.type === 'page' && t.url === page2Url),
+    STEP_TIMEOUT_MS,
+    'activating a discarded tab did not rebuild its webContents (see TabManager.reviveTab)',
+  );
+  const revived = await CdpClient.connect(revivedTarget.webSocketDebuggerUrl, 'revived page');
+  clients.push(revived);
+  await waitFor(
+    'revived page painted the same document, unshrouded',
+    async () => {
+      const s = await revived.evaluate(PAGE_STATE_EXPR);
+      return s.body.includes(PAGE2_MARKER) && s.opacity === '1';
+    },
+    STEP_TIMEOUT_MS,
+    'the revived tab has a target but never painted its page (see Tab.restoreNavigation)',
+  );
+  await waitFor(
+    'revived tab is no longer dormant and kept its back history',
+    async () => {
+      const v = (await ui.evaluate(`window.voksa.tabs.list()`)).find((t) => t.id === victimId);
+      return v?.isDiscarded === false && v?.canGoBack === true;
+    },
+    STEP_TIMEOUT_MS,
+    'canGoBack is false after the revive: navigationHistory.restore({entries,index}) did not replay the session history (see Tab.captureNavigation / Tab.restoreNavigation)',
+  );
+
+  // And the restored history actually WALKS, not just reports a boolean.
+  await ui.evaluate(`window.voksa.tabs.back(${J(victimId)})`);
+  await waitFor(
+    'going back from a revived tab reaches the pre-discard entry',
+    async () => (await listTargets()).some((t) => t.type === 'page' && t.url === pageUrl),
+    STEP_TIMEOUT_MS,
+    'back after a revive did not reach the entry that preceded the discard: the restored history is not navigable',
+  );
+  pass('MEMORY SAVER DISCARD/REVIVE');
+
+  // --- 13. MEMORY SAVER UNDER STREAM MODE: A REVIVE MUST NOT LEAK ----------------
+  // A revive rebuilds a webContents and replays a navigation while Stream Mode
+  // is on. That is exactly the situation the whole L0/L1.5/L2 stack exists for,
+  // except the tab arrives with no view at all, so the ordering is its own code
+  // path (curtain BEFORE the view exists, then shroud, then guard, then the
+  // document). If it were wrong, the first frame of the replayed page would be
+  // painted raw: an unmasked email, on screen, mid-stream.
+  await ui.evaluate(`window.voksa.stream.update({ enabled: true })`);
+  await ui.evaluate(`window.voksa.tabs.activate(${J(victimId)})`);
+  await ui.evaluate(`window.voksa.tabs.navigate(${J(victimId)}, ${J(page2Url)})`);
+  await waitFor(
+    'victim is masked under Stream before the discard',
+    async () => {
+      const s = await revived.evaluate(PAGE_STATE_EXPR);
+      return s.body.includes(PAGE2_MARKER) && !s.body.includes(PAGE2_EMAIL) && s.opacity === '1';
+    },
+    STEP_TIMEOUT_MS,
+    'the victim tab never reached a masked-and-visible state under Stream: the leak assertions below would be vacuous',
+  );
+
+  await ui.evaluate(`window.voksa.tabs.activate(${J(otherId)})`);
+  if ((await ui.evaluate(`window.voksa.tabs.discard(${J(victimId)})`)) !== true) {
+    throw new Error('discard under Stream Mode returned false');
+  }
+  await waitFor(
+    'stream victim renderer is gone',
+    async () => !(await listTargets()).some((t) => t.type === 'page' && t.url === page2Url),
+    STEP_TIMEOUT_MS,
+  );
+
+  // Revive, then WATCH. Every sample that shows the raw email while the page is
+  // actually visible (opacity 1) is a leaked frame. This cannot prove the
+  // absence of a leak between two samples, but it is the same detector the
+  // preload-less frame scenario uses, and it caught real regressions there.
+  await ui.evaluate(`window.voksa.tabs.activate(${J(victimId)})`);
+  const streamTarget = await waitFor(
+    'revived-under-stream page target',
+    async () => (await listTargets()).find((t) => t.type === 'page' && t.url === page2Url),
+    STEP_TIMEOUT_MS,
+  );
+  const streamRevived = await CdpClient.connect(streamTarget.webSocketDebuggerUrl, 'revived under stream');
+  clients.push(streamRevived);
+
+  let maskedAndVisible = false;
+  const deadline = Date.now() + STEP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    let s;
+    try {
+      s = await streamRevived.evaluate(PAGE_STATE_EXPR);
+    } catch {
+      break; // target went away (a re-navigation); the checks below still apply
+    }
+    if (s.body.includes(PAGE2_EMAIL) && s.opacity === '1') {
+      throw new Error(
+        `ZERO-FRAME LEAK on revive: the replayed page painted raw ${PAGE2_EMAIL} at opacity 1. ` +
+          'The curtain must be raised (and awaited) BEFORE createView, and the L0 shroud armed before the ' +
+          'document loads (see TabManager.runMaterialize / reviveTab).',
+      );
+    }
+    if (s.body.includes(PAGE2_MARKER) && !s.body.includes(PAGE2_EMAIL) && s.opacity === '1') {
+      maskedAndVisible = true;
+      break;
+    }
+  }
+  if (!maskedAndVisible) {
+    throw new Error(
+      'the tab revived under Stream Mode never came back masked AND visible: it is either still shrouded ' +
+        '(a permanently blank tab) or never repainted (see Tab.restoreNavigation)',
+    );
+  }
+  await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  pass('MEMORY SAVER REVIVE UNDER STREAM');
+
+  // --- 14. ABOUT LOGO ACTUALLY LOADS ---------------------------------------------
+  // The chrome UI is served over file:// in a build. An <img> whose URL does not
+  // resolve there fails SILENTLY (empty box, no exception, no console error the
+  // suite would catch), which is exactly why this card used to draw an icon glyph
+  // instead of the product's real logo. naturalWidth is the only honest proof the
+  // bytes arrived.
+  await ui.evaluate(`window.voksa.tabs.navigate(${J(victimId)}, "voksa://settings")`);
+  const logo = await waitFor(
+    'About card logo decoded',
+    async () => {
+      const l = await ui.evaluate(
+        `(() => { const i = document.querySelector('img[data-voksa-logo]');
+           return i ? { src: i.currentSrc || i.src, w: i.naturalWidth, done: i.complete } : null; })()`,
+      );
+      return l && l.done ? l : null;
+    },
+    STEP_TIMEOUT_MS,
+    'the settings page never rendered its About logo element',
+  );
+  if (!logo.w) {
+    throw new Error(
+      `the About logo failed to load (naturalWidth 0) from ${logo.src}: the asset does not resolve under file://. ` +
+        'Import it (so Vite emits it into dist-ui) instead of hardcoding a path.',
+    );
+  }
+  pass('ABOUT LOGO LOADS');
+
+  // --- 15. NO RENDERER EXCEPTIONS -------------------------------------------------
   if (uiExceptions.length > 0) {
     throw new Error(
       `chrome UI threw ${uiExceptions.length} uncaught exception(s) during the run:\n${uiExceptions.join('\n')}`,

@@ -54,6 +54,13 @@ export function TabContextMenu({ tab, x, y, onClose }: Props): React.ReactElemen
       {item(tab.isMuted ? t('Réactiver le son') : t('Couper le son'), () =>
         void voksa.tabs.mute(tab.id),
       )}
+      {/* Memory Saver, on demand. Hidden where discard() would refuse anyway
+          (the visible tab, an internal page, an already dormant tab): a dead
+          menu entry is worse than no entry. */}
+      {!tab.isActive &&
+        !tab.isInternal &&
+        !tab.isDiscarded &&
+        item(t('Mettre en veille (libérer la mémoire)'), () => void voksa.tabs.discard(tab.id))}
       <div className="my-1 h-px bg-border mx-2" />
       {item(t('Rouvrir l’onglet fermé'), () => void voksa.tabs.reopenClosed())}
       <div className="my-1 h-px bg-border mx-2" />

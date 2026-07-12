@@ -14,6 +14,7 @@
     "build": "npm run build:ui && npm run build:main",
     "build:ui": "vite build",
     "build:main": "node scripts/build-main.mjs",
+    "gen:credits": "node scripts/gen-credits.mjs",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.ui.json --noEmit",
     "lint": "eslint \"src/**/*.{ts,tsx}\"",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\"",

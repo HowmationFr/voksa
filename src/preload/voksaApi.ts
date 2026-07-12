@@ -46,6 +46,8 @@ export function buildVoksaApi() {
       reopenClosed: () => ipcRenderer.invoke(IPC.TAB_REOPEN_CLOSED),
       mute: (id: string, muted?: boolean) => ipcRenderer.invoke(IPC.TAB_MUTE, id, muted),
       duplicate: (id: string) => ipcRenderer.invoke(IPC.TAB_DUPLICATE, id),
+      /** Free this tab's renderer. Returns false when the tab is protected. */
+      discard: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC.TAB_DISCARD, id),
       closeOthers: (id: string) => ipcRenderer.invoke(IPC.TAB_CLOSE_OTHERS, id),
       closeRight: (id: string) => ipcRenderer.invoke(IPC.TAB_CLOSE_RIGHT, id),
       setChromeBounds: (bounds: ChromeBounds) =>

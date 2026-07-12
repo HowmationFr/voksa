@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import {
   AppWindow,
+  ArrowUpCircle,
   BookOpen,
   Clock,
   Download,
@@ -17,6 +18,7 @@ import { voksa } from '../../lib/bridge';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useStreamStore } from '../../stores/streamStore';
 import { useTabsStore } from '../../stores/tabsStore';
+import { useUpdatesStore } from '../../stores/updatesStore';
 import { DEVTOOLS_SHORTCUT, shortcut } from '../../lib/platform';
 import { useT } from '../../lib/i18n';
 
@@ -28,6 +30,8 @@ export function Menu({ onClose, onOpenFind, onOpenPrint }: Props): React.ReactEl
   const stream = useStreamStore((s) => s.config);
   const toggleStream = useStreamStore((s) => s.toggle);
   const activeTab = useTabsStore((s) => s.tabs.find((t) => t.isActive) ?? null);
+  const updateState = useUpdatesStore((s) => s.state);
+  const installUpdate = useUpdatesStore((s) => s.install);
   const t = useT();
 
   useEffect(() => {
@@ -52,6 +56,25 @@ export function Menu({ onClose, onOpenFind, onOpenPrint }: Props): React.ReactEl
         role="menu"
         className="fixed right-2 top-[86px] w-[288px] bg-bg-elevated border border-border rounded-2xl shadow-float z-50 animate-scale-in overflow-hidden p-1.5"
       >
+        {/* An update already downloaded and waiting: the ONE thing worth
+            putting above everything else, Chrome-style. */}
+        {updateState?.phase === 'ready' && (
+          <>
+            <MenuItem
+              icon={ArrowUpCircle}
+              tone="accent"
+              label={t('Mettre à jour Voksa {version}', {
+                version: updateState.availableVersion ?? '',
+              })}
+              onClick={() => {
+                onClose();
+                void installUpdate();
+              }}
+            />
+            <Divider />
+          </>
+        )}
+
         <MenuItem
           icon={AppWindow}
           label={t('Nouvelle fenêtre')}
@@ -195,14 +218,25 @@ function MenuItem({
   onClick,
   disabled,
   accent,
+  tone = 'stream',
 }: {
   icon: React.ComponentType<{ size?: number | string; className?: string }>;
   label: string;
   hint?: string;
   onClick?: () => void;
   disabled?: boolean;
+  /** Highlight this item. Which color it takes is decided by `tone`. */
   accent?: boolean;
+  /**
+   * Highlight color. 'stream' (default, violet) is the Stream Mode toggle;
+   * 'accent' (blue) matches the update dot and the settings install button.
+   * An item passing tone='accent' is highlighted without needing `accent`.
+   */
+  tone?: 'accent' | 'stream';
 }): React.ReactElement {
+  const highlighted = accent || tone === 'accent';
+  const highlightText = tone === 'accent' ? 'text-accent hover:bg-accent/10' : 'text-stream hover:bg-stream/10';
+  const highlightIcon = tone === 'accent' ? 'text-accent' : 'text-stream';
   return (
     <button
       role="menuitem"
@@ -211,12 +245,15 @@ function MenuItem({
       className={`w-full flex items-center gap-3 px-3 h-9 rounded-lg text-sm transition-colors ${
         disabled
           ? 'text-fg-subtle cursor-not-allowed'
-          : accent
-            ? 'text-stream hover:bg-stream/10'
+          : highlighted
+            ? highlightText
             : 'text-fg hover:bg-bg-hover'
       }`}
     >
-      <Icon size={16} className={`flex-shrink-0 ${accent ? 'text-stream' : 'text-fg-muted'}`} />
+      <Icon
+        size={16}
+        className={`flex-shrink-0 ${highlighted ? highlightIcon : 'text-fg-muted'}`}
+      />
       <span className="flex-1 text-left">{label}</span>
       {hint && <span className="text-2xs text-fg-subtle tabular-nums">{hint}</span>}
     </button>

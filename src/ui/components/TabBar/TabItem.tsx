@@ -68,8 +68,16 @@ export function TabItem({
               // background they otherwise blend in completely and nothing
               // delimits one tab from the next.
               'bg-bg-inset/70 border-border/70 text-fg-muted hover:bg-bg-hover hover:text-fg hover:border-border'
-        } ${isDragging ? 'opacity-40' : ''}`}
-        title={maskedTitle}
+        } ${isDragging ? 'opacity-40' : ''} ${
+          // Memory Saver: a tab whose renderer was freed. Dimmed like Chrome
+          // does, so "it reloaded when I came back" is never a surprise.
+          tab.isDiscarded ? 'opacity-60' : ''
+        }`}
+        title={
+          tab.isDiscarded
+            ? t('{title} (en veille, mémoire libérée)', { title: maskedTitle })
+            : maskedTitle
+        }
       >
         <div className="flex-shrink-0 w-4 h-4 flex items-center justify-center">
           {tab.isLoading ? (
@@ -78,7 +86,7 @@ export function TabItem({
             <img
               src={tab.favicon}
               alt=""
-              className="w-4 h-4 rounded-sm"
+              className={`w-4 h-4 rounded-sm ${tab.isDiscarded ? 'grayscale' : ''}`}
               onError={(e) => {
                 const img = e.currentTarget as HTMLImageElement;
                 img.style.display = 'none';

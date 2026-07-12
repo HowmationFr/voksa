@@ -134,11 +134,19 @@ export class UpdateController {
     return this.state;
   }
 
-  /** Silent background check a moment after boot (packaged only). */
-  scheduleStartupCheck(): void {
+  /**
+   * Silent background check a moment after boot, then every few hours
+   * (packaged only). Without the periodic leg, a browser left running for
+   * days never learns a new version exists. `check()` self-guards against
+   * re-entry and against the 'ready' phase, so the interval is safe to fire
+   * unconditionally. Both timers are unref'd: they never hold the app alive.
+   */
+  scheduleChecks(): void {
     if (!this.updater) return;
-    const timer = setTimeout(() => this.check(), 10_000);
-    timer.unref();
+    const boot = setTimeout(() => this.check(), 10_000);
+    boot.unref();
+    const periodic = setInterval(() => this.check(), 4 * 60 * 60 * 1000);
+    periodic.unref();
   }
 
   install(): void {

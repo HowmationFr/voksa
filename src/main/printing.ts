@@ -22,7 +22,9 @@ export class PrintController {
 
   private webContentsFor(tabId: string): Electron.WebContents | null {
     const tab = this.tabs.getAll().find((t) => t.id === tabId);
-    if (!tab || tab.isInternal) return null;
+    // A discarded tab has no webContents: nothing to print (the UI only offers
+    // printing for the active tab, which is never discarded).
+    if (!tab || tab.isInternal || !tab.view) return null;
     const wc = tab.view.webContents;
     return wc.isDestroyed() ? null : wc;
   }

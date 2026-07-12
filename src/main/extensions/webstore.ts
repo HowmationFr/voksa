@@ -90,6 +90,9 @@ export async function setupChromeWebStore(session: Session): Promise<void> {
           const tab = target.tabs.create(details.url ?? 'voksa://newtab', {
             activate: details.active !== false,
           });
+          // create() without deferLoad always materializes a view; the library
+          // requires a real webContents in the [tab, window] tuple it gets back.
+          if (!tab.view) throw new Error('chrome.tabs.create produced a tab with no webContents');
           return [tab.view.webContents, target.window] as [WebContents, BaseWindow];
         },
         selectTab: (wc: WebContents) => {

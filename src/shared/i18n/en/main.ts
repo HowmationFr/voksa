@@ -46,6 +46,11 @@ export const enMain: Record<string, string> = {
   'Refuser': 'Deny',
   '« {name} » demande des autorisations supplémentaires': '"{name}" requests additional permissions',
 
+  // Update notification (ipc/handlers.ts)
+  'Voksa {version} est prête': 'Voksa {version} is ready',
+  'Une mise à jour de Voksa est prête': 'A Voksa update is ready',
+  'Redémarrez pour installer la nouvelle version.': 'Restart to install the new version.',
+
   // Address bar suggestions built in main (ipc/handlers.ts)
   'Aller à {query}': 'Go to {query}',
   'Rechercher « {query} »': 'Search for "{query}"',

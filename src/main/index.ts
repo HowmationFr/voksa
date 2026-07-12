@@ -7,6 +7,7 @@ import { registerIpcHandlers, wireWindowIpc } from './ipc/handlers';
 import { buildApplicationMenu } from './menu';
 import { getStreamMode } from './stream-mode/StreamModeController';
 import { RecorderWatcher } from './stream-mode/recorderWatcher';
+import { getMemorySaver } from './perf/MemorySaverController';
 import { setupChromeWebStore } from './extensions/webstore';
 import {
   focusedWindow,
@@ -60,6 +61,14 @@ getStreamMode();
 
 // CRITICAL for Google login: must run before app.whenReady().
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+
+// Windows toasts are keyed by AppUserModelID. The NSIS installer writes one
+// into the shortcut, but a portable/unpacked run has none and every
+// notification would silently no-op; declare it explicitly. Must match
+// electron-builder.yml `appId`.
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.voksa.app');
+}
 
 // The single-instance lock stays even with multi-window support: two
 // PROCESSES on one profile would fight over SQLite and the session file.
@@ -240,6 +249,11 @@ async function start() {
   });
   recorderWatcher.start();
   app.on('before-quit', () => recorderWatcher.stop());
+
+  // Memory Saver: frees the renderer of cold background tabs (they reload on
+  // return). Started after the windows exist; a sweep with no window is a no-op.
+  getMemorySaver().start();
+  app.on('before-quit', () => getMemorySaver().stop());
 }
 
 app.on('second-instance', (_e, argv) => {

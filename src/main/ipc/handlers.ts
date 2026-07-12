@@ -1,4 +1,4 @@
-import { ipcMain, Menu, nativeTheme, session, shell, webContents } from 'electron';
+import { ipcMain, Menu, nativeTheme, Notification, session, shell, webContents } from 'electron';
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 import os from 'node:os';
 import { buildApplicationMenu } from '../menu';
@@ -84,6 +84,38 @@ function sendToChrome(win: AppWindow, channel: string, ...args: unknown[]): void
 /** Guarded send to EVERY window's chromeView (global data: bookmarks...). */
 function broadcastToChromes(channel: string, ...args: unknown[]): void {
   for (const win of allWindows()) sendToChrome(win, channel, ...args);
+}
+
+/**
+ * OS toast when an update finished downloading. The in-app dot on the burger
+ * button only reaches a user who looks at the window; this reaches one who
+ * does not. Clicking it restarts into the new version. Best-effort by design:
+ * a platform without notification support (or a failed Windows toast) must
+ * never break the update flow, which works fine without any toast at all.
+ */
+function notifyUpdateReady(version: string | undefined, install: () => void): void {
+  try {
+    if (!Notification.isSupported()) return;
+    const toast = new Notification({
+      title: version
+        ? t('Voksa {version} est prête', { version })
+        : t('Une mise à jour de Voksa est prête'),
+      body: t('Redémarrez pour installer la nouvelle version.'),
+      silent: false,
+    });
+    toast.on('click', () => {
+      const win = focusedWindow();
+      if (win && !win.window.isDestroyed()) win.window.focus();
+      install();
+    });
+    // win32 only: a toast can fail (no AppUserModelID, notifications off).
+    toast.on('failed', (_e, error) => {
+      console.warn('[updates] notification failed:', error);
+    });
+    toast.show();
+  } catch (err) {
+    console.warn('[updates] could not show the update notification:', err);
+  }
 }
 
 export function registerIpcHandlers(): void {
@@ -193,6 +225,7 @@ export function registerIpcHandlers(): void {
     senderWindow(e)?.tabs.setMuted(id, muted),
   );
   ipcMain.handle(IPC.TAB_DUPLICATE, (e, id: string) => senderWindow(e)?.tabs.duplicate(id));
+  ipcMain.handle(IPC.TAB_DISCARD, (e, id: string) => senderWindow(e)?.tabs.discard(id) ?? false);
   ipcMain.handle(IPC.TAB_CLOSE_OTHERS, (e, id: string) => senderWindow(e)?.tabs.closeOthers(id));
   ipcMain.handle(IPC.TAB_CLOSE_RIGHT, (e, id: string) => senderWindow(e)?.tabs.closeRight(id));
 
@@ -223,11 +256,21 @@ export function registerIpcHandlers(): void {
 
   // --- Auto-update (GitHub Releases) -----------------------------------------
   const updates = new UpdateController();
-  updates.onStateChanged((state) => broadcastToChromes(IPC.UPDATES_STATE_CHANGED, state));
+  // Edge-detect the transition into 'ready': the controller re-broadcasts on
+  // EVERY event, download-progress ticks included, so a naive check would fire
+  // one toast per percent. 'ready' means the new version is already downloaded
+  // and only waits for a restart.
+  let wasReady = updates.getState().phase === 'ready';
+  updates.onStateChanged((state) => {
+    broadcastToChromes(IPC.UPDATES_STATE_CHANGED, state);
+    const isReady = state.phase === 'ready';
+    if (isReady && !wasReady) notifyUpdateReady(state.availableVersion, () => updates.install());
+    wasReady = isReady;
+  });
   ipcMain.handle(IPC.UPDATES_GET_STATE, () => updates.getState());
   ipcMain.handle(IPC.UPDATES_CHECK, () => updates.check());
   ipcMain.handle(IPC.UPDATES_INSTALL, () => updates.install());
-  updates.scheduleStartupCheck();
+  updates.scheduleChecks();
 
   // --- Page context menu (rendered in the chrome UI) -------------------------
   ipcMain.handle(
@@ -246,7 +289,7 @@ export function registerIpcHandlers(): void {
       // A download aborts the navigation: drop that tab's curtain immediately
       // instead of freezing until the safety timeout, whichever window owns it.
       for (const win of allWindows()) {
-        const host = win.tabs.getAll().find((t) => t.view.webContents.id === webContentsId);
+        const host = win.tabs.getAll().find((t) => t.view?.webContents.id === webContentsId);
         if (host) {
           win.curtain.drop(host.id);
           return;
@@ -626,7 +669,9 @@ export function registerIpcHandlers(): void {
     if (!win) return;
     const active = win.tabs.getActive();
     const wc =
-      active && !active.isInternal ? active.view.webContents : win.chromeView.webContents;
+      active && !active.isInternal && active.view
+        ? active.view.webContents
+        : win.chromeView.webContents;
     wc.openDevTools({ mode: 'detach' });
   });
 

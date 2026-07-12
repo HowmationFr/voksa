@@ -8,6 +8,8 @@ export const enMenus: Record<string, string> = {
   // Same key as the native menu item (en/main.ts, which wins the merge):
   // both must carry the same value or one silently shadows the other.
   'Nouvelle fenêtre': 'New window',
+  'Mettre à jour Voksa {version}': 'Update Voksa {version}',
+  'Mettre en veille (libérer la mémoire)': 'Put to sleep (free memory)',
   'Historique': 'History',
   'Téléchargements': 'Downloads',
   'Favoris': 'Bookmarks',

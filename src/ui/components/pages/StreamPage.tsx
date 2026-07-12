@@ -26,6 +26,7 @@ import {
   X,
 } from 'lucide-react';
 import { useStreamStore } from '../../stores/streamStore';
+import { SettingsBackLink } from './SettingsBackLink';
 import { Toggle } from '../ui/Toggle';
 import { askConfirm } from '../ui/ConfirmDialog';
 import { useT } from '../../lib/i18n';
@@ -169,6 +170,7 @@ export function StreamPage(): React.ReactElement {
   return (
     <div className="bg-bg text-fg">
       <div className="max-w-4xl mx-auto px-6 py-10">
+        <SettingsBackLink />
         <HeroHeader
           enabled={config.enabled}
           maskCount={maskCount}

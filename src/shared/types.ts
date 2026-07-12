@@ -1,4 +1,5 @@
 import type { StreamModeConfig } from './streamConfig';
+import type { MemorySaverLevel } from './memorySaver';
 
 export type TabError = {
   code: number;
@@ -26,6 +27,11 @@ export type TabState = {
   isAudible: boolean;
   isMuted: boolean;
   isInternal: boolean;
+  /**
+   * Memory Saver: the tab has NO webContents at all, its renderer was freed.
+   * It keeps its url/title/history and comes back when the user selects it.
+   */
+  isDiscarded: boolean;
   /** Rounded page zoom, percent (100 = default). */
   zoomPercent: number;
   /** Set when the last main-frame load failed → chrome UI renders an error page. */
@@ -197,6 +203,10 @@ export type AppSettings = {
   sitePermissions: Record<string, Record<string, PermissionDecision>>;
   /** Per-host persisted zoom levels (Electron zoom-level units). */
   zoomLevels: Record<string, number>;
+  /** Chrome-like tab discarding: frees the renderer of inactive tabs. */
+  memorySaver: MemorySaverLevel;
+  /** Hosts never discarded, even when idle (matched on a dot boundary). */
+  memorySaverExceptions: string[];
 };
 
 export type ExtensionInfo = {

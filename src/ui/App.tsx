@@ -5,6 +5,7 @@ import { initStreamBridge } from './stores/streamStore';
 import { initSettingsBridge } from './stores/settingsStore';
 import { initExtensionsBridge } from './stores/extensionsStore';
 import { initCurtainBridge } from './stores/curtainStore';
+import { initUpdatesBridge } from './stores/updatesStore';
 import { useThemeSync } from './lib/theme';
 
 export function App(): React.ReactElement {
@@ -16,12 +17,14 @@ export function App(): React.ReactElement {
     const unsubC = initTabsBridge();
     const unsubD = initExtensionsBridge();
     const unsubE = initCurtainBridge();
+    const unsubF = initUpdatesBridge();
     return () => {
       unsubA();
       unsubB();
       unsubC();
       unsubD();
       unsubE();
+      unsubF();
     };
   }, []);
 

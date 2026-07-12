@@ -3,6 +3,7 @@ import path from 'node:path';
 import { app } from 'electron';
 import type { AppSettings } from '../../shared/types';
 import { DEFAULT_STREAM_CONFIG } from '../../shared/streamConfig';
+import { DEFAULT_MEMORY_SAVER, MEMORY_SAVER_LEVELS } from '../../shared/memorySaver';
 
 const DEFAULTS: AppSettings = {
   searchEngine: 'google',
@@ -14,6 +15,8 @@ const DEFAULTS: AppSettings = {
   extensionOrder: [],
   sitePermissions: {},
   zoomLevels: {},
+  memorySaver: DEFAULT_MEMORY_SAVER,
+  memorySaverExceptions: [],
 };
 
 const VALID_ENGINES: AppSettings['searchEngine'][] = [
@@ -24,6 +27,8 @@ const VALID_ENGINES: AppSettings['searchEngine'][] = [
 ];
 const VALID_THEMES: AppSettings['theme'][] = ['light', 'dark', 'system'];
 const VALID_LANGUAGES: AppSettings['language'][] = ['system', 'fr', 'en'];
+/** Bounded so a hand-edited settings.json can't grow the sweep unboundedly. */
+const MAX_EXCEPTIONS = 200;
 
 let cached: AppSettings | null = null;
 let filePath: string | null = null;
@@ -53,6 +58,16 @@ function sanitize(parsed: Partial<AppSettings>): AppSettings {
   if (!merged.zoomLevels || typeof merged.zoomLevels !== 'object') {
     merged.zoomLevels = {};
   }
+  if (!MEMORY_SAVER_LEVELS.includes(merged.memorySaver)) {
+    merged.memorySaver = DEFAULT_MEMORY_SAVER;
+  }
+  merged.memorySaverExceptions = Array.isArray(merged.memorySaverExceptions)
+    ? merged.memorySaverExceptions
+        .filter((h): h is string => typeof h === 'string')
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean)
+        .slice(0, MAX_EXCEPTIONS)
+    : [];
   if (typeof merged.homepage !== 'string' || !merged.homepage.trim()) {
     merged.homepage = DEFAULTS.homepage;
   } else if (/^hbb:\/\//i.test(merged.homepage)) {

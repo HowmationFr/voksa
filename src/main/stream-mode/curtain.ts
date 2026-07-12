@@ -79,13 +79,20 @@ export class CurtainController {
    */
   async raise(
     tabId: string,
-    tabView: WebContentsView,
+    /**
+     * The tab's view, or null when it has none: a Memory Saver revive raises
+     * the curtain BEFORE rebuilding the webContents, precisely so nothing can
+     * paint in between. The backdrop is painted by the chromeView (which sits
+     * above the tab in z-order), so the tab view is only ever needed for the
+     * screenshot flavour.
+     */
+    tabView: WebContentsView | null,
     kind: BackdropKind,
   ): Promise<void> {
     const token = this.nextToken++;
 
     let dataURL: string | null = null;
-    if (kind === 'screenshot') {
+    if (kind === 'screenshot' && tabView) {
       try {
         const image = await tabView.webContents.capturePage();
         if (!image.isEmpty()) dataURL = image.toDataURL({ scaleFactor: 1 });

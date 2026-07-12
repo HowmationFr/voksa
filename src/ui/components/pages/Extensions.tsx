@@ -3,6 +3,7 @@ import { Puzzle, Store } from 'lucide-react';
 import { useExtensionsStore } from '../../stores/extensionsStore';
 import { voksa } from '../../lib/bridge';
 import { ExtensionsSection } from './ExtensionsSection';
+import { SettingsBackLink } from './SettingsBackLink';
 import { useT } from '../../lib/i18n';
 
 /** Dedicated extensions page (voksa://extensions), Chrome's chrome://extensions. */
@@ -13,6 +14,7 @@ export function ExtensionsPage(): React.ReactElement {
   return (
     <div className="bg-bg text-fg min-h-full">
       <div className="max-w-2xl mx-auto px-6 py-10">
+        <SettingsBackLink />
         <div className="flex items-center justify-between mb-2">
           <h1 className="flex items-center gap-3 text-xl font-semibold">
             <Puzzle size={20} className="text-accent" />

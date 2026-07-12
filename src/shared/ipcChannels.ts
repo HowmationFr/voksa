@@ -15,6 +15,8 @@ export const IPC = {
   TAB_REOPEN_CLOSED: 'tab:reopenClosed',
   TAB_MUTE: 'tab:mute',
   TAB_DUPLICATE: 'tab:duplicate',
+  /** Memory Saver: free this tab's renderer (it reloads when selected again). */
+  TAB_DISCARD: 'tab:discard',
   TAB_CLOSE_OTHERS: 'tab:closeOthers',
   TAB_CLOSE_RIGHT: 'tab:closeRight',
   CHROME_SET_OVERLAY: 'chrome:setOverlay',

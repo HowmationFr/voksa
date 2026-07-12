@@ -193,13 +193,10 @@ const INDIRECTIONS: Indirection[] = [
     extract: (text) => fieldStrings(text, ['label']),
     min: 2,
   },
-  {
-    // THEMES entries rendered via t(th.label). Scoped to the THEMES block:
-    // the neighboring ENGINES labels are brand names rendered WITHOUT t().
-    file: 'ui/components/pages/Settings.tsx',
-    extract: (text, rel) => fieldStrings(sliceBlock(text, rel, 'const THEMES', /\n\]/g), ['label']),
-    min: 3,
-  },
+  // NB: Settings.tsx used to route its THEMES labels through t(th.label). The
+  // Chrome-style rewrite builds its section/row structure with ALREADY
+  // translated strings (t('literal') results, never keys), so it has no
+  // indirection left and no non-literal t() call site either.
   {
     // Byte-unit array rendered via t(units[i]) in formatBytes.
     file: 'ui/components/pages/Downloads.tsx',
@@ -237,7 +234,6 @@ const NON_LITERAL_T_SITES: Record<string, number> = {
   'ui/components/SiteSettingsPopover.tsx': 1, // t(permissionName(...))
   'ui/components/pages/Downloads.tsx': 1, // t(units[i])
   'ui/components/pages/ErrorPage.tsx': 1, // t(known)
-  'ui/components/pages/Settings.tsx': 1, // t(th.label)
   'ui/components/pages/StreamPage.tsx': 3, // t(card.label), t(card.description), t(card.demo)
 };
 

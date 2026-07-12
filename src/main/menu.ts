@@ -30,7 +30,8 @@ export function buildApplicationMenu(getApp: () => AppWindow | null): Menu {
   // back to the chrome UI; same rule as APP_OPEN_DEVTOOLS in handlers.ts.
   const devtoolsTarget = () => {
     const a = active();
-    if (a && !a.isInternal) return a.view.webContents;
+    // A discarded tab has no webContents either: fall back to the chrome UI.
+    if (a && !a.isInternal && a.view) return a.view.webContents;
     return getApp()?.chromeView.webContents ?? null;
   };
   const cmd = (command: string) => {
@@ -122,7 +123,7 @@ export function buildApplicationMenu(getApp: () => AppWindow | null): Menu {
         {
           label: t('Recharger (sans cache)'),
           accelerator: 'CmdOrCtrl+Shift+R',
-          click: () => active()?.view.webContents.reloadIgnoringCache(),
+          click: () => active()?.view?.webContents.reloadIgnoringCache(),
         },
         { type: 'separator' },
         {

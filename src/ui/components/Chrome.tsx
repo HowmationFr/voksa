@@ -28,6 +28,7 @@ function internalSlugForUrl(url: string): Slug | null {
   if (slug === 'stream') return 'stream';
   if (slug === 'downloads') return 'downloads';
   if (slug === 'extensions') return 'extensions';
+  if (slug === 'credits') return 'credits';
   return 'newtab';
 }
 
@@ -128,13 +129,12 @@ export function Chrome(): React.ReactElement {
   return (
     <div className="relative flex flex-col h-screen w-screen">
       {streamColorCss !== null && <style>{streamColorCss}</style>}
-      {/* Stream Mode active indicator: a distinct accent color so the state
-          is unmistakable at a glance while live. */}
+      {/* Stream Mode active indicator: a single accent bar across the very top
+          of the window, so the state is unmistakable at a glance while live.
+          Deliberately NOT a full-perimeter ring: framing the whole window read
+          as a UI border rather than a status signal. */}
       {streamEnabled && (
-        <>
-          <div className="pointer-events-none absolute inset-0 z-20 ring-1 ring-inset ring-stream/40 rounded-[2px]" />
-          <div className="pointer-events-none absolute inset-x-0 top-0 z-20 h-[3px] bg-gradient-to-r from-stream/70 via-stream to-stream/70" />
-        </>
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-20 h-[3px] bg-gradient-to-r from-stream/70 via-stream to-stream/70" />
       )}
       <div ref={toolbarRef} className="flex-shrink-0 bg-bg border-b border-border">
         <TabBar />

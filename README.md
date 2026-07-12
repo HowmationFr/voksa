@@ -66,11 +66,13 @@ Voksa works the other way around: because it IS the browser, pages are kept invi
 
 - Sign in to **Google, Gmail and YouTube** normally.
 - Install extensions straight from the **Chrome Web Store**: uBlock Origin, Bitwarden and friends just work, cascading right-click menus included.
-- Nested **bookmark folders** with drag and drop, full **history** and search.
+- **Multiple windows**, nested **bookmark folders** with drag and drop, full **history** and search.
+- **Memory Saver**: inactive tabs give their memory back to your machine and reload where you left them, scroll position and half-filled forms included. Three levels, plus a list of sites to always keep alive.
 - **Downloads**, find in page, per-site **permission controls**, persistent zoom, print with live preview, session restore.
 - Full **dark mode** (light, dark, or follow the system).
 - **French and English**, detected from your system, switchable in Settings.
-- **Automatic updates**: Voksa keeps itself current from official releases, with a manual check in Settings if you prefer.
+- **Automatic updates**: Voksa downloads new versions in the background and installs them on the next restart.
+- Built on free software, and it says so: `voksa://credits` lists every open source project shipped inside Voksa, with its licence.
 
 ## 📥 Install
 

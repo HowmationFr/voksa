@@ -85,4 +85,18 @@ export const enPages: Record<string, string> = {
   'Cette page est inaccessible': 'This page is unreachable',
   'Réessayer': 'Retry',
   'Code {code}': 'Code {code}',
+
+  // voksa://credits
+  'Crédits': 'Credits',
+  'Afficher toutes les licences': 'Show all licences',
+  'Tout masquer': 'Hide all',
+  'Voksa est un logiciel libre : son {source} est public. Il fonctionne grâce au projet Open Source {chromium} et aux {n} projets ci-dessous, dont le code est distribué avec le navigateur.':
+    'Voksa is free software: its {source} is public. It runs on the {chromium} open source project and on the {n} projects below, whose code is distributed with the browser.',
+  'code source': 'source code',
+  'Rechercher un projet ou une licence': 'Search for a project or a licence',
+  'Aucun projet ne correspond à « {query} ».': 'No project matches “{query}”.',
+  'afficher la licence': 'show licence',
+  'masquer la licence': 'hide licence',
+  'licence non fournie': 'no licence provided',
+  'site web': 'homepage',
 };

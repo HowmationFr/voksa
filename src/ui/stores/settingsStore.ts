@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { DEFAULT_STREAM_CONFIG } from '../../shared/streamConfig';
+import { DEFAULT_MEMORY_SAVER } from '../../shared/memorySaver';
 import type { AppSettings } from '../../shared/types';
 import { voksa } from '../lib/bridge';
 
@@ -13,6 +14,8 @@ const DEFAULTS: AppSettings = {
   extensionOrder: [],
   sitePermissions: {},
   zoomLevels: {},
+  memorySaver: DEFAULT_MEMORY_SAVER,
+  memorySaverExceptions: [],
 };
 
 type SettingsState = {

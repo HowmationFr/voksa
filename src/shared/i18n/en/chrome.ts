@@ -17,6 +17,8 @@ export const enChrome: Record<string, string> = {
     'Stream Mode active: click to disable, Alt+click for settings',
   'Activer le Mode Stream ({shortcut})': 'Enable Stream Mode ({shortcut})',
   'Menu': 'Menu',
+  'Menu : une mise à jour est prête': 'Menu: an update is ready',
+  '{title} (en veille, mémoire libérée)': '{title} (dormant, memory freed)',
 
   // WindowControls.tsx
   'Réduire': 'Minimize',

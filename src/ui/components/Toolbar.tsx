@@ -5,6 +5,7 @@ import { ExtensionActions } from './ExtensionActions';
 import { useTabsStore } from '../stores/tabsStore';
 import { useStreamStore } from '../stores/streamStore';
 import { useSettingsStore } from '../stores/settingsStore';
+import { useUpdateReady } from '../stores/updatesStore';
 import { voksa } from '../lib/bridge';
 import type { DownloadItem } from '../../shared/types';
 import { shortcut } from '../lib/platform';
@@ -29,6 +30,7 @@ export function Toolbar({
   const active = useTabsStore((s) => s.tabs.find((t) => t.isActive) ?? null);
   const stream = useStreamStore((s) => s.config);
   const homepage = useSettingsStore((s) => s.settings.homepage);
+  const updateReady = useUpdateReady();
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
 
   useEffect(() => {
@@ -129,9 +131,18 @@ export function Toolbar({
         <Shield size={16} />
       </button>
 
-      <IconButton onClick={onOpenMenu} title={t('Menu')}>
+      {/* Raw button (not IconButton): it needs `relative` to anchor the update
+          dot, same treatment the downloads button already got. */}
+      <button
+        onClick={onOpenMenu}
+        title={updateReady ? t('Menu : une mise à jour est prête') : t('Menu')}
+        className="relative flex items-center justify-center w-9 h-9 rounded-lg text-fg-muted hover:text-fg hover:bg-bg-hover transition-colors no-drag"
+      >
         <MoreVertical size={18} />
-      </IconButton>
+        {updateReady && (
+          <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-accent" />
+        )}
+      </button>
     </div>
   );
 }

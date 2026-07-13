@@ -35,6 +35,8 @@ export const enSettings: Record<string, string> = {
     'Open a specific page or set of pages',
   'Pages à ouvrir': 'Pages to open',
   'Utiliser les pages actuelles': 'Use current pages',
+  'https://exemple.com': 'https://example.com',
+  'Liste pleine ({n} pages).': 'List full ({n} pages).',
   'Aucune page : Voksa ouvrira un nouvel onglet.':
     'No pages: Voksa will open a new tab.',
 

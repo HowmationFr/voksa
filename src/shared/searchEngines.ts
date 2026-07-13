@@ -135,9 +135,19 @@ export function isBuiltinEngineId(value: unknown): value is SearchEngineId {
   return typeof value === 'string' && value in SEARCH_ENGINES;
 }
 
-/** Normalized keyword: what the address bar compares against, lowercase and space-free. */
+/**
+ * Normalized keyword: what the address bar compares against.
+ *
+ * Trim and lowercase, and nothing else. It must NOT collapse inner whitespace:
+ * this function canonicalizes STORED keywords, but findEngineByKeyword runs the
+ * user's TYPED TEXT through it too, and a canonicalizer that strips spaces
+ * turns an exact comparison into a fuzzy one. "git hub " would match an engine
+ * keyed `github`, arm the chip and wipe the words the user was in the middle of
+ * typing. A keyword with a space is refused at the door instead (see
+ * validateCustomEngine), so an exact compare is always enough.
+ */
 export function normalizeKeyword(raw: string): string {
-  return raw.trim().toLowerCase().replace(/\s+/g, '');
+  return raw.trim().toLowerCase();
 }
 
 /**
@@ -148,7 +158,13 @@ export function normalizeKeyword(raw: string): string {
  * user typed to the wrong place. A template we cannot honour is refused at the
  * door rather than half-applied later.
  */
-export type EngineProblem = 'name' | 'keyword' | 'keyword-taken' | 'url' | 'url-placeholder';
+export type EngineProblem =
+  | 'name'
+  | 'keyword'
+  | 'keyword-space'
+  | 'keyword-taken'
+  | 'url'
+  | 'url-placeholder';
 
 export function validateCustomEngine(
   engine: { name: string; keyword: string; searchUrl: string },
@@ -160,6 +176,12 @@ export function validateCustomEngine(
 
   const keyword = normalizeKeyword(engine.keyword);
   if (!keyword) return 'keyword';
+  // A keyword with a space is unhonourable, not merely awkward: the address bar
+  // arms keyword mode on the Space that follows a keyword filling the whole
+  // field, so a two-word keyword would fire halfway through being typed and
+  // could never be finished. Refuse it here rather than silently rewrite it to
+  // something the user never chose ("my wiki" quietly becoming `mywiki`).
+  if (/\s/.test(keyword)) return 'keyword-space';
   if (existing.some((def) => def.keyword === keyword && def.id !== selfId)) return 'keyword-taken';
 
   const url = engine.searchUrl.trim();
@@ -264,6 +286,13 @@ export function suggestUrlFor(
  * silently, with no way to ask for what you actually typed. And once the mode
  * is UI state, a bare "duckduckgo.com" can never be mistaken for a search
  * either: it is just a domain, and it navigates.
+ *
+ * The comparison is EXACT, and that word is load-bearing. It once ran the typed
+ * text through a canonicalizer that stripped inner spaces, which quietly made
+ * it fuzzy again: "git hub " matched an engine keyword `github`, so the chip
+ * armed itself and the two words the user was typing vanished from the box. The
+ * mode stayed state, but the trigger had become an inference. Keywords are
+ * space-free by validation, so nothing here needs to be lenient.
  */
 export function findEngineByKeyword(
   text: string,

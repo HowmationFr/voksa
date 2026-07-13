@@ -84,4 +84,45 @@ describe('isUrlLike', () => {
     expect(isUrlLike('hello world')).toBe(false);
     expect(isUrlLike('how to code')).toBe(false);
   });
+  it('still calls a file: path with spaces an address', () => {
+    // The one place a space is not ambiguous: nobody searches for file:///.
+    expect(isUrlLike('file:///C:/Users/me/My Documents/a.pdf')).toBe(true);
+  });
+});
+
+describe('isUrlLike and normalizeInput can never disagree', () => {
+  // They MUST agree on every input, because the dropdown asks the first what to
+  // offer and Enter asks the second what to do. They did not: isUrlLike rejected
+  // anything with a space before it ever looked at the scheme, while
+  // normalizeInput's scheme and localhost branches had no space check at all. So
+  // the dropdown offered to SEARCH strings that Enter silently NAVIGATED to.
+  const CASES = [
+    'https://api.example.com/v1 returned 500',
+    'about:blank x',
+    'localhost:3000 cors error',
+    'voksa://settings is broken',
+    'hbb://history and stuff',
+    '8.8.8.8 is down',
+    'example.com/a b',
+    'file:///C:/Users/me/My Documents/a.pdf',
+    'https://example.com',
+    'hello world',
+    'localhost',
+  ];
+
+  for (const input of CASES) {
+    it(`agrees on ${JSON.stringify(input)}`, () => {
+      const url = normalizeInput(input, GOOGLE);
+      const isSearch = url.startsWith(GOOGLE.searchUrl.split('%s')[0]);
+      // isUrlLike said "address" <=> normalizeInput did NOT send it to search.
+      expect(isUrlLike(input)).toBe(!isSearch);
+    });
+  }
+
+  it('sends a scheme-prefixed phrase to search rather than to a broken URL', () => {
+    expect(normalizeInput('https://api.example.com/v1 returned 500', GOOGLE)).toContain(
+      'search?q=',
+    );
+    expect(normalizeInput('localhost:3000 cors error', GOOGLE)).toContain('search?q=');
+  });
 });

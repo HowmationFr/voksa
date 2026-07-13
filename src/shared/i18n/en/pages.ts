@@ -102,6 +102,8 @@ export const enPages: Record<string, string> = {
   'Donnez un nom à ce moteur.': 'Give this engine a name.',
   'Choisissez un mot-clé (ce que vous taperez dans la barre d’adresse).':
     'Choose a keyword (what you will type in the address bar).',
+  'Un mot-clé ne peut pas contenir d’espace : c’est l’espace qui le déclenche.':
+    'A keyword cannot contain a space: the space is what triggers it.',
   'Ce mot-clé est déjà utilisé par un autre moteur.':
     'That keyword is already used by another engine.',
   'L’URL doit commencer par https://.': 'The URL must start with https://.',

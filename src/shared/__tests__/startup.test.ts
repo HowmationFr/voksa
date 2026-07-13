@@ -33,6 +33,22 @@ describe('sanitizeStartupUrls', () => {
 
   it('ignores non-strings and non-arrays (a hand-edited settings.json can say anything)', () => {
     expect(sanitizeStartupUrls([1, null, 'ok', {}])).toEqual(['ok']);
+  });
+
+  it('treats two spellings of the same page as one page', () => {
+    // Entries are stored raw and only turned into URLs by normalizeInput at open
+    // time, so a dedupe over the raw strings let "example.com" and
+    // "https://example.com" both through: the same page opened twice, at every
+    // launch, forever. First spelling seen wins.
+    expect(sanitizeStartupUrls(['example.com', 'https://example.com'])).toEqual(['example.com']);
+    expect(sanitizeStartupUrls(['https://example.com/', 'https://example.com'])).toEqual([
+      'https://example.com/',
+    ]);
+    expect(sanitizeStartupUrls(['https://EXAMPLE.com', 'example.com'])).toEqual([
+      'https://EXAMPLE.com',
+    ]);
+    // Different pages on the same host stay distinct.
+    expect(sanitizeStartupUrls(['example.com/a', 'example.com/b'])).toHaveLength(2);
     expect(sanitizeStartupUrls('a.com')).toEqual([]);
     expect(sanitizeStartupUrls(undefined)).toEqual([]);
   });

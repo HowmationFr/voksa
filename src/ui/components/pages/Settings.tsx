@@ -26,7 +26,11 @@ import {
   resolveEngines,
   type SearchEngineDef,
 } from '../../../shared/searchEngines';
-import type { StartupMode } from '../../../shared/startup';
+import {
+  MAX_STARTUP_URLS,
+  startupUrlsFull,
+  type StartupMode,
+} from '../../../shared/startup';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useStreamStore } from '../../stores/streamStore';
 import { useTabsStore } from '../../stores/tabsStore';
@@ -37,6 +41,7 @@ import { Trans } from '../ui/Trans';
 import { ClearDataDialog } from '../ClearDataDialog';
 import { voksa } from '../../lib/bridge';
 import { useT } from '../../lib/i18n';
+import { useMaskedText } from '../../lib/masking';
 import { useNavigateActiveTab } from '../../lib/navigation';
 import logoUrl from '../../../../resources/icon.png';
 
@@ -443,8 +448,14 @@ export function SettingsPage(): React.ReactElement {
     <div className="bg-bg text-fg min-h-full">
       <div className="max-w-5xl mx-auto px-6 py-10">
         <div className="flex gap-10">
-          {/* Sidebar: Chrome puts navigation on the left and keeps it in view. */}
-          <aside className="hidden md:block w-52 flex-shrink-0">
+          {/* Sidebar: Chrome puts navigation on the left and keeps it in view.
+              Never hidden at a breakpoint. It was `hidden md:block` back when it
+              was a table of contents over one long scrolling page, where losing
+              it cost nothing. Now that one section renders at a time it IS the
+              navigation, and the window's own minWidth (760px) sits below
+              Tailwind's md (768px): hiding it stranded the user on whichever
+              section happened to be active, with no way to reach the other six. */}
+          <aside className="w-52 flex-shrink-0">
             <div className="sticky top-10">
               <h1 className="flex items-center gap-2.5 text-lg font-semibold mb-6">
                 <SettingsIcon size={19} className="text-accent" />
@@ -729,9 +740,16 @@ function StartupUrlsEditor({
   const tabs = useTabsStore((s) => s.tabs);
   const [input, setInput] = useState('');
 
+  // The cap is enforced HERE, not only in sanitize(): main slices the list back
+  // to MAX_STARTUP_URLS and the store adopts what main returns, so without this
+  // the 21st entry would clear the input, disable nothing, and simply never
+  // appear. A control that accepts input it silently discards is worse than one
+  // that refuses it.
+  const full = startupUrlsFull(urls);
+
   const add = () => {
     const url = input.trim();
-    if (!url || urls.includes(url)) {
+    if (!url || full || urls.includes(url)) {
       setInput('');
       return;
     }
@@ -742,7 +760,10 @@ function StartupUrlsEditor({
   const useCurrentTabs = () => {
     const open = tabs.filter((tab) => !tab.isInternal).map((tab) => tab.url);
     const merged = [...urls];
-    for (const url of open) if (!merged.includes(url)) merged.push(url);
+    for (const url of open) {
+      if (startupUrlsFull(merged)) break;
+      if (!merged.includes(url)) merged.push(url);
+    }
     onChange(merged);
   };
 
@@ -758,13 +779,14 @@ function StartupUrlsEditor({
               add();
             }
           }}
-          placeholder="https://exemple.com"
-          className="flex-1 h-9 px-3 rounded-lg bg-bg border border-border text-sm outline-none focus:border-accent/60"
+          disabled={full}
+          placeholder={full ? t('Liste pleine ({n} pages).', { n: MAX_STARTUP_URLS }) : t('https://exemple.com')}
+          className="flex-1 h-9 px-3 rounded-lg bg-bg border border-border text-sm outline-none focus:border-accent/60 disabled:opacity-50"
         />
         <button
           type="button"
           onClick={add}
-          disabled={!input.trim()}
+          disabled={!input.trim() || full}
           className="flex-shrink-0 px-3 h-9 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
           {t('Ajouter')}
@@ -772,7 +794,8 @@ function StartupUrlsEditor({
         <button
           type="button"
           onClick={useCurrentTabs}
-          className="flex-shrink-0 px-3 h-9 rounded-lg text-sm text-fg hover:bg-bg-hover border border-border transition-colors"
+          disabled={full}
+          className="flex-shrink-0 px-3 h-9 rounded-lg text-sm text-fg hover:bg-bg-hover border border-border disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
           {t('Utiliser les pages actuelles')}
         </button>
@@ -784,21 +807,44 @@ function StartupUrlsEditor({
       ) : (
         <ul className="divide-y divide-border">
           {urls.map((url) => (
-            <li key={url} className="flex items-center gap-3 px-4 py-2.5">
-              <span className="flex-1 min-w-0 text-[13px] text-fg truncate">{url}</span>
-              <button
-                type="button"
-                onClick={() => onChange(urls.filter((u) => u !== url))}
-                aria-label={t('Retirer {host}', { host: url })}
-                className="flex-shrink-0 flex items-center justify-center w-7 h-7 rounded-lg text-fg-muted hover:text-danger hover:bg-danger/10 transition-colors"
-              >
-                <X size={13} />
-              </button>
-            </li>
+            <StartupUrlRow
+              key={url}
+              url={url}
+              onRemove={() => onChange(urls.filter((u) => u !== url))}
+            />
           ))}
         </ul>
       )}
     </div>
+  );
+}
+
+/**
+ * One startup page. A row of its own because the mask is a hook: it cannot be
+ * called from inside a map, and a startup URL is user text that can carry an
+ * IP, an email or a masked keyword straight onto a stream.
+ */
+function StartupUrlRow({
+  url,
+  onRemove,
+}: {
+  url: string;
+  onRemove: () => void;
+}): React.ReactElement {
+  const t = useT();
+  const masked = useMaskedText(url);
+  return (
+    <li className="flex items-center gap-3 px-4 py-2.5">
+      <span className="flex-1 min-w-0 text-[13px] text-fg truncate">{masked}</span>
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={t('Retirer {host}', { host: masked })}
+        className="flex-shrink-0 flex items-center justify-center w-7 h-7 rounded-lg text-fg-muted hover:text-danger hover:bg-danger/10 transition-colors"
+      >
+        <X size={13} />
+      </button>
+    </li>
   );
 }
 

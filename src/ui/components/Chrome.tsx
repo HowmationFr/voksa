@@ -29,6 +29,7 @@ function internalSlugForUrl(url: string): Slug | null {
   if (slug === 'downloads') return 'downloads';
   if (slug === 'extensions') return 'extensions';
   if (slug === 'credits') return 'credits';
+  if (slug === 'search') return 'search';
   return 'newtab';
 }
 

@@ -39,7 +39,12 @@
 //      frame by frame: a visible page still showing the probe email is a leak.
 //  14. ABOUT LOGO LOADS: the settings About card really decodes the product
 //      icon over file:// (a broken <img> there fails silently).
-//  15. NO RENDERER EXCEPTIONS: no Runtime.exceptionThrown on the chrome UI
+//  15. INTERNAL URL VISIBLE: an internal page shows its voksa:// address in the
+//      bar, the new tab page keeps it empty, and voksa://search really renders
+//      (a missing slug registration falls back to NewTab in silence).
+//  16. TAB-TO-SEARCH KEYWORDS: "duckduckgo.com cats" searches DDG, while
+//      "duckduckgo.com" alone still navigates to the site.
+//  17. NO RENDERER EXCEPTIONS: no Runtime.exceptionThrown on the chrome UI
 //      target during the whole run.
 //
 // Catches boot crashes, preload failures, a blank chrome UI, a broken voksa
@@ -1151,6 +1156,18 @@ async function main() {
   // instead of the product's real logo. naturalWidth is the only honest proof the
   // bytes arrived.
   await ui.evaluate(`window.voksa.tabs.navigate(${J(victimId)}, "voksa://settings")`);
+  // Settings shows ONE section at a time (the sidebar is navigation, not a
+  // table of contents), so the About card only exists once its tab is picked.
+  await waitFor(
+    'settings sidebar reached the About section',
+    async () =>
+      ui.evaluate(
+        `(() => { const b = document.querySelector('[data-voksa-settings-nav="about"]');
+           if (!b) return false; b.click(); return true; })()`,
+      ),
+    STEP_TIMEOUT_MS,
+    'the settings sidebar never rendered its About entry',
+  );
   const logo = await waitFor(
     'About card logo decoded',
     async () => {
@@ -1171,7 +1188,101 @@ async function main() {
   }
   pass('ABOUT LOGO LOADS');
 
-  // --- 15. NO RENDERER EXCEPTIONS -------------------------------------------------
+  // --- 15. INTERNAL PAGES SHOW THEIR URL (and voksa://search really renders) ------
+  // Two assertions, and BOTH are needed: asserting only that voksa://settings
+  // shows in the bar would still pass if the bar were hardcoded to it, and
+  // asserting only that the new tab page is empty is what the old (broken)
+  // behaviour did for every internal page.
+  const addressValue = async () =>
+    ui.evaluate(
+      `(() => { const i = document.querySelector('[data-voksa-address]'); return i ? i.value : null; })()`,
+    );
+
+  await waitFor(
+    'the address bar shows voksa://settings',
+    async () => (await addressValue()) === 'voksa://settings',
+    STEP_TIMEOUT_MS,
+    'an internal page left the address bar empty: it must show its voksa:// address (see displayUrl in AddressBar.tsx)',
+  );
+
+  await ui.evaluate(`window.voksa.tabs.navigate(${J(victimId)}, "voksa://newtab")`);
+  await waitFor(
+    'the new tab page keeps an empty address bar, like Chrome',
+    async () => (await addressValue()) === '',
+    STEP_TIMEOUT_MS,
+    'voksa://newtab printed its address into the bar: that bar is the search box, a prefix to delete first is in the way',
+  );
+
+  // The three-place registration of an internal page (InternalPage slug union,
+  // Chrome.internalSlugForUrl, Tab.titleForInternalUrl): miss the middle one and
+  // the page silently renders NewTab instead. Nothing else would notice.
+  await ui.evaluate(`window.voksa.tabs.navigate(${J(victimId)}, "voksa://search")`);
+  const engineCount = await waitFor(
+    'voksa://search renders the engine list',
+    async () => {
+      const n = await ui.evaluate(
+        `(() => { const el = document.querySelector('[data-voksa-search-engines]');
+           return el ? Number(el.getAttribute('data-voksa-search-engines')) : null; })()`,
+      );
+      return n || null;
+    },
+    STEP_TIMEOUT_MS,
+    'voksa://search did not render its engine table (a missing slug in Chrome.internalSlugForUrl silently falls back to the new tab page)',
+  );
+  if (engineCount < 2) throw new Error(`voksa://search lists ${engineCount} engine(s)`);
+  pass('INTERNAL URL VISIBLE');
+
+  // --- 16. TAB-TO-SEARCH KEYWORDS -------------------------------------------------
+  // Keyword mode is STATE the address bar holds and names explicitly on the way
+  // out (tabs.navigate(id, terms, engine)); main builds the URL. What is
+  // verified here is that contract, and above all that plain text is NEVER
+  // reinterpreted: a phrase starting with an engine's domain must reach the
+  // DEFAULT engine, whole. Inferring the mode from the string meant
+  // "bing.com vs google" searched Bing for "vs google", losing half the query.
+  const kwTabId = await ui.evaluate(`window.voksa.tabs.create("voksa://newtab")`);
+  const urlOf = async (id) =>
+    (await ui.evaluate(`window.voksa.tabs.list()`)).find((t) => t.id === id)?.url;
+
+  await ui.evaluate(`window.voksa.tabs.navigate(${J(kwTabId)}, "chats", "duckduckgo")`);
+  await waitFor(
+    'keyword mode searches the named engine',
+    async () => (await urlOf(kwTabId))?.startsWith('https://duckduckgo.com/?q=chats'),
+    STEP_TIMEOUT_MS,
+    'tabs.navigate with an engine override did not search that engine (handlers.ts TAB_NAVIGATE)',
+  );
+
+  await ui.evaluate(`window.voksa.tabs.navigate(${J(kwTabId)}, "bing.com vs google")`);
+  await waitFor(
+    'a phrase starting with a keyword is NOT hijacked',
+    async () => {
+      const url = await urlOf(kwTabId);
+      // Default engine (google), and the WHOLE phrase, keyword included.
+      return Boolean(
+        url?.startsWith('https://www.google.com/search?q=') && url.includes('bing.com'),
+      );
+    },
+    STEP_TIMEOUT_MS,
+    'typing "bing.com vs google" was rewritten into a Bing search: the keyword hijacked plain text',
+  );
+
+  // And a search engine's own address still opens the site.
+  await ui.evaluate(`window.voksa.tabs.navigate(${J(kwTabId)}, "duckduckgo.com")`);
+  await waitFor(
+    'a bare keyword still navigates to the site',
+    async () => {
+      const url = await urlOf(kwTabId);
+      // Not an equality check: once the real navigation commits, the site's
+      // own canonical URL (trailing slash, a redirect) replaces ours. What
+      // must hold is that we went TO the site and did not search FOR it.
+      return Boolean(url?.startsWith('https://duckduckgo.com') && !url.includes('?q='));
+    },
+    STEP_TIMEOUT_MS,
+    'typing "duckduckgo.com" searched instead of navigating: the keyword stole a real URL',
+  );
+  await ui.evaluate(`window.voksa.tabs.close(${J(kwTabId)})`);
+  pass('TAB-TO-SEARCH KEYWORDS');
+
+  // --- 17. NO RENDERER EXCEPTIONS -------------------------------------------------
   if (uiExceptions.length > 0) {
     throw new Error(
       `chrome UI threw ${uiExceptions.length} uncaught exception(s) during the run:\n${uiExceptions.join('\n')}`,

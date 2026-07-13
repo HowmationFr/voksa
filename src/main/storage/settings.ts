@@ -4,9 +4,21 @@ import { app } from 'electron';
 import type { AppSettings } from '../../shared/types';
 import { DEFAULT_STREAM_CONFIG } from '../../shared/streamConfig';
 import { DEFAULT_MEMORY_SAVER, MEMORY_SAVER_LEVELS } from '../../shared/memorySaver';
+import {
+  DEFAULT_SEARCH_ENGINE,
+  getEngine,
+  resolveEngines,
+  sanitizeCustomEngines,
+} from '../../shared/searchEngines';
+import {
+  DEFAULT_STARTUP_MODE,
+  isStartupMode,
+  sanitizeStartupUrls,
+} from '../../shared/startup';
 
 const DEFAULTS: AppSettings = {
-  searchEngine: 'google',
+  searchEngine: DEFAULT_SEARCH_ENGINE,
+  customEngines: [],
   theme: 'system',
   language: 'system',
   homepage: 'voksa://newtab',
@@ -17,14 +29,11 @@ const DEFAULTS: AppSettings = {
   zoomLevels: {},
   memorySaver: DEFAULT_MEMORY_SAVER,
   memorySaverExceptions: [],
+  startupMode: DEFAULT_STARTUP_MODE,
+  startupUrls: [],
+  preconnect: true,
 };
 
-const VALID_ENGINES: AppSettings['searchEngine'][] = [
-  'google',
-  'duckduckgo',
-  'startpage',
-  'brave',
-];
 const VALID_THEMES: AppSettings['theme'][] = ['light', 'dark', 'system'];
 const VALID_LANGUAGES: AppSettings['language'][] = ['system', 'fr', 'en'];
 /** Bounded so a hand-edited settings.json can't grow the sweep unboundedly. */
@@ -48,7 +57,14 @@ function sanitize(parsed: Partial<AppSettings>): AppSettings {
     ...parsed,
     streamMode: { ...DEFAULT_STREAM_CONFIG, ...(parsed?.streamMode ?? {}) },
   };
-  if (!VALID_ENGINES.includes(merged.searchEngine)) merged.searchEngine = 'google';
+  // Custom engines first: the default engine may BE one of them, and a custom
+  // engine the user deleted (or that a hand-edited file broke) must not leave
+  // the browser pointing at an engine that no longer exists.
+  merged.customEngines = sanitizeCustomEngines(merged.customEngines);
+  const engines = resolveEngines(merged.customEngines);
+  if (getEngine(merged.searchEngine, engines).id !== merged.searchEngine) {
+    merged.searchEngine = DEFAULT_SEARCH_ENGINE;
+  }
   if (!VALID_THEMES.includes(merged.theme)) merged.theme = 'system';
   if (!VALID_LANGUAGES.includes(merged.language)) merged.language = 'system';
   if (!Array.isArray(merged.extensionOrder)) merged.extensionOrder = [];
@@ -68,6 +84,9 @@ function sanitize(parsed: Partial<AppSettings>): AppSettings {
         .filter(Boolean)
         .slice(0, MAX_EXCEPTIONS)
     : [];
+  if (!isStartupMode(merged.startupMode)) merged.startupMode = DEFAULT_STARTUP_MODE;
+  merged.startupUrls = sanitizeStartupUrls(merged.startupUrls);
+  if (typeof merged.preconnect !== 'boolean') merged.preconnect = DEFAULTS.preconnect;
   if (typeof merged.homepage !== 'string' || !merged.homepage.trim()) {
     merged.homepage = DEFAULTS.homepage;
   } else if (/^hbb:\/\//i.test(merged.homepage)) {
@@ -82,7 +101,11 @@ function load(): AppSettings {
   if (cached) return cached;
   const file = getPath();
   let parsed: Partial<AppSettings> = {};
-  if (fs.existsSync(file)) {
+  // The FILE existing is what makes this an existing profile, not whether we
+  // managed to read it: a corrupt settings.json must not cost the user their
+  // session restore on top of their settings.
+  const fromExistingProfile = fs.existsSync(file);
+  if (fromExistingProfile) {
     try {
       // Strip a UTF-8 BOM (some editors add one) before parsing.
       const raw = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
@@ -97,6 +120,15 @@ function load(): AppSettings {
         // ignore
       }
     }
+  }
+  // Migration 0.3 -> 0.4. Until 0.4 Voksa restored the previous session
+  // unconditionally, so a profile that predates `startupMode` has been living
+  // with 'restore'. The new DEFAULT is 'newtab' (what a fresh profile gets),
+  // but silently applying it here would look, to that user, exactly like the
+  // browser losing all their tabs on an update. So: existing profile keeps its
+  // behaviour, and can now change it in Settings.
+  if (fromExistingProfile && parsed.startupMode === undefined) {
+    parsed = { ...parsed, startupMode: 'restore' };
   }
   cached = sanitize(parsed);
   return cached;

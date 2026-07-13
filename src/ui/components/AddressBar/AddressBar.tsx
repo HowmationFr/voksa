@@ -1,13 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Bookmark, BookmarkCheck, Search, SlidersHorizontal } from 'lucide-react';
+import { Bookmark, BookmarkCheck, Info, Search, SlidersHorizontal } from 'lucide-react';
+import { findEngineByKeyword, getEngine, resolveEngines } from '../../../shared/searchEngines';
 import { voksa } from '../../lib/bridge';
 import { useTabsStore } from '../../stores/tabsStore';
 import { useStreamStore } from '../../stores/streamStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 import { Suggestions } from './Suggestions';
 import { SiteSettingsPopover } from '../SiteSettingsPopover';
 import type { Suggestion } from '../../../shared/types';
 import { useMaskedText } from '../../lib/masking';
 import { useT } from '../../lib/i18n';
+
+/** The one internal page that keeps an empty bar: it IS the search box. */
+const NEW_TAB_URL = 'voksa://newtab';
 
 type Props = {
   onSuggestionsVisibleChange?: (visible: boolean) => void;
@@ -31,12 +36,23 @@ export function AddressBar({
   // to select a range) instead of selecting everything. mousedown fires
   // before focus, so the flag is set in time for the onFocus handler.
   const focusByMouseRef = useRef(false);
+  const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [query, setQuery] = useState('');
   const [focused, setFocused] = useState(false);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const [isBookmarked, setIsBookmarked] = useState(false);
   const [siteSettingsOpen, setSiteSettingsOpen] = useState(false);
+  // Tab-to-search: the engine whose keyword the user typed. Entering the mode
+  // moves the keyword out of the text and into the chip, so `query` holds the
+  // search terms alone; the engine is then named EXPLICITLY on the way out
+  // (navigate / suggestions take an engine id). It is never re-derived from the
+  // text, which is what stops "bing.com vs google" from becoming a Bing search
+  // for "vs google". The renderer still builds no URL: main does that.
+  const [keywordId, setKeywordId] = useState<string | null>(null);
+  // The user's engines count too: a custom keyword must work like a built-in.
+  const customEngines = useSettingsStore((s) => s.settings.customEngines);
+  const engines = useMemo(() => resolveEngines(customEngines), [customEngines]);
 
   const suggestionsVisible = focused && suggestions.length > 0;
   useEffect(() => {
@@ -67,14 +83,40 @@ export function AddressBar({
   // While Stream Mode is ON and the bar isn't being edited, DISPLAY the masked
   // URL (viewers never see the raw address). Focusing to edit reveals the real
   // URL (the user's deliberate action), and navigation always uses the real one.
+  //
+  // Internal pages show their voksa:// address like any other page, and go
+  // through the SAME masking path: no `if (isInternal) skipMask` shortcut to
+  // maintain, so a future internal URL carrying a parameter cannot become a
+  // leak. Only the new tab page keeps an empty bar, as Chrome does: that bar
+  // is where you type, a prefix to delete first would just be in the way.
   const maskedUrl = useMaskedText(active?.url);
+  const displayUrl = (masked: boolean) => {
+    if (!active || active.url === NEW_TAB_URL) return '';
+    return masked && stream.enabled ? maskedUrl : active.url;
+  };
   useEffect(() => {
     if (!focused && active) {
-      const display = active.isInternal ? '' : stream.enabled ? maskedUrl : active.url;
-      setQuery(display);
+      setKeywordId(null);
+      setQuery(displayUrl(true));
       void voksa.bookmarks.findByUrl(active.url).then((b) => setIsBookmarked(!!b));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, focused, stream.enabled, maskedUrl]);
+
+  // Switching tab must reset the bar even while it is FOCUSED. Ctrl+Tab and
+  // Ctrl+1-9 are native menu accelerators handled in main: they never blur the
+  // input, so without this the chip (and, under Stream Mode, the real URL of
+  // the tab we just left, revealed by focus) would stay on screen over the new
+  // tab, and Enter would apply them to it.
+  const activeId = active?.id;
+  useEffect(() => {
+    if (!activeId) return;
+    setKeywordId(null);
+    setSuggestions([]);
+    setSelectedIndex(-1);
+    setQuery(displayUrl(!focused));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
 
   // Keep the bookmark star in sync when the bookmark set changes anywhere
   // else in the UI (e.g. right-click delete on the bookmark bar).
@@ -99,7 +141,9 @@ export function AddressBar({
       return;
     }
     const t = setTimeout(() => {
-      void voksa.suggestions.query(q).then((s) => {
+      // With the chip up, `q` is TERMS and the engine is named explicitly. Main
+      // builds every search URL either way: the renderer never does.
+      void voksa.suggestions.query(q, keywordId ?? undefined).then((s) => {
         if (!cancelled) setSuggestions(s);
       });
     }, 80);
@@ -107,11 +151,13 @@ export function AddressBar({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [query, focused]);
+  }, [query, focused, keywordId]);
 
-  const navigate = (target: string) => {
+  /** `engine` set = `target` is a query for that engine, not an address. */
+  const navigate = (target: string, engine?: string) => {
     if (!active) return;
-    void voksa.tabs.navigate(active.id, target);
+    void voksa.tabs.navigate(active.id, target, engine);
+    setKeywordId(null);
     inputRef.current?.blur();
   };
 
@@ -121,11 +167,24 @@ export function AddressBar({
       if (selectedIndex >= 0 && suggestions[selectedIndex]) {
         navigate(suggestions[selectedIndex].url);
       } else if (query.trim()) {
-        navigate(query.trim());
+        navigate(query.trim(), keywordId ?? undefined);
       }
     } else if (e.key === 'Escape') {
       inputRef.current?.blur();
-      if (active) setQuery(active.isInternal ? '' : active.url);
+      setKeywordId(null);
+      if (active) setQuery(displayUrl(false));
+    } else if (
+      e.key === 'Backspace' &&
+      keywordId &&
+      e.currentTarget.selectionStart === 0 &&
+      e.currentTarget.selectionEnd === 0
+    ) {
+      // Backspace at the very start drops the chip and hands the keyword back
+      // as text. It stays dropped: onChange only re-arms on a fresh
+      // keyword-then-Space sequence, never by re-reading the line.
+      e.preventDefault();
+      setQuery(`${getEngine(keywordId, engines).keyword} ${query}`);
+      setKeywordId(null);
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
       setSelectedIndex((i) => Math.min(i + 1, suggestions.length - 1));
@@ -201,27 +260,65 @@ export function AddressBar({
                 }
               />
             </button>
+          ) : isInternal && active?.url !== NEW_TAB_URL ? (
+            // An internal page now shows its address, so the search glyph would
+            // be a lie. It has no site permissions either: nothing to click.
+            <Info size={14} className="text-fg-muted" aria-label={t('Page interne de Voksa')} />
           ) : (
             <Search size={14} className="text-fg-muted" />
           )}
         </div>
+
+        {keywordId && (
+          <span className="flex-shrink-0 flex items-center px-2 h-6 rounded-md bg-accent/10 text-accent text-xs font-medium whitespace-nowrap">
+            {t('Rechercher sur {engine}', { engine: getEngine(keywordId, engines).name })}
+          </span>
+        )}
+
         <input
           ref={inputRef}
           type="text"
           value={query}
+          data-voksa-address
           placeholder={t('Recherchez ou saisissez une URL')}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            const next = e.target.value;
+            // Keyword mode is entered by ONE keystroke: the Space typed right
+            // after a keyword that is the WHOLE input, exactly like Chrome.
+            //
+            // It is never re-derived from the text afterwards. Doing that was a
+            // trap: "bing.com vs google" would silently become a Bing search for
+            // "vs google", and dismissing the chip only lasted until the next
+            // character re-armed it. Here, once the chip is gone, it stays gone
+            // until the user types the sequence again.
+            const justTypedSpace = next.endsWith(' ') && next.trimEnd() === query.trimEnd();
+            const engine =
+              !keywordId && justTypedSpace ? findEngineByKeyword(next, engines) : null;
+            if (engine) {
+              setKeywordId(engine.id);
+              setQuery('');
+            } else {
+              setQuery(next);
+            }
+          }}
           onMouseDown={() => {
             if (document.activeElement !== inputRef.current) {
               focusByMouseRef.current = true;
             }
           }}
           onFocus={() => {
+            // Cancel a blur still in its 150 ms grace period: clicking out and
+            // straight back in used to let that timer fire while the input held
+            // focus, wiping what the user had typed (and now the chip too).
+            if (blurTimerRef.current !== null) {
+              clearTimeout(blurTimerRef.current);
+              blurTimerRef.current = null;
+            }
             setFocused(true);
             setSiteSettingsOpen(false);
             // Reveal the real URL for editing (display was masked while blurred
             // under Stream Mode); navigation always uses this real value.
-            if (active && !active.isInternal) setQuery(active.url);
+            if (active && !keywordId) setQuery(displayUrl(false));
             // Select-all only for keyboard focus (Tab); mouse clicks keep
             // the browser's native caret placement + drag selection.
             if (!focusByMouseRef.current) {
@@ -230,7 +327,10 @@ export function AddressBar({
             focusByMouseRef.current = false;
           }}
           onBlur={() => {
-            setTimeout(() => {
+            // The delay lets a click on a suggestion land before the dropdown
+            // unmounts.
+            blurTimerRef.current = setTimeout(() => {
+              blurTimerRef.current = null;
               setFocused(false);
               setSelectedIndex(-1);
             }, 150);

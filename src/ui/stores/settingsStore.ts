@@ -1,11 +1,14 @@
 import { create } from 'zustand';
 import { DEFAULT_STREAM_CONFIG } from '../../shared/streamConfig';
 import { DEFAULT_MEMORY_SAVER } from '../../shared/memorySaver';
+import { DEFAULT_SEARCH_ENGINE } from '../../shared/searchEngines';
+import { DEFAULT_STARTUP_MODE } from '../../shared/startup';
 import type { AppSettings } from '../../shared/types';
 import { voksa } from '../lib/bridge';
 
 const DEFAULTS: AppSettings = {
-  searchEngine: 'google',
+  searchEngine: DEFAULT_SEARCH_ENGINE,
+  customEngines: [],
   theme: 'system',
   language: 'system',
   homepage: 'voksa://newtab',
@@ -16,6 +19,9 @@ const DEFAULTS: AppSettings = {
   zoomLevels: {},
   memorySaver: DEFAULT_MEMORY_SAVER,
   memorySaverExceptions: [],
+  startupMode: DEFAULT_STARTUP_MODE,
+  startupUrls: [],
+  preconnect: true,
 };
 
 type SettingsState = {

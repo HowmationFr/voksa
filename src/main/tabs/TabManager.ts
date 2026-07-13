@@ -8,6 +8,7 @@ import type { SessionWindow, SessionTab } from '../storage/session';
 import { computeTabBounds } from './bounds';
 import { getSettings, setSettings } from '../storage/settings';
 import { normalizeInput } from '../../shared/urlUtils';
+import { defaultEngine } from '../search/engines';
 import { sameMaskingConfig, type StreamModeConfig } from '../../shared/streamConfig';
 import { getStreamMode } from '../stream-mode/StreamModeController';
 import { CurtainController, isInternalUrl } from '../stream-mode/curtain';
@@ -204,7 +205,7 @@ export class TabManager extends EventEmitter {
     url?: string,
     opts?: { activate?: boolean; title?: string; deferLoad?: boolean },
   ): Tab {
-    const normalized = url ? normalizeInput(url, getSettings().searchEngine) : undefined;
+    const normalized = url ? normalizeInput(url, defaultEngine()) : undefined;
     const tab = new Tab({
       url: normalized,
       title: opts?.title,
@@ -550,7 +551,7 @@ export class TabManager extends EventEmitter {
   async navigate(id: string, rawUrl: string): Promise<void> {
     const tab = this.tabs.find((t) => t.id === id);
     if (!tab) return;
-    const url = normalizeInput(rawUrl, getSettings().searchEngine);
+    const url = normalizeInput(rawUrl, defaultEngine());
     // A dormant tab has no webContents to load into: wake it first, and drop
     // the saved history so the revive does not replay the OLD page over the
     // URL the user just asked for.
@@ -700,6 +701,35 @@ export class TabManager extends EventEmitter {
     const activeTab = this.tabs[activeIndex];
     if (activeTab) this.setActive(activeTab.id);
     return true;
+  }
+
+  /**
+   * Take back the previous run's "recently closed" stack without restoring its
+   * tabs. Ctrl+Shift+T is a separate promise from session restore: it must keep
+   * working for someone who starts on the new tab page.
+   */
+  adoptClosedStack(stack: SessionTab[] | undefined): void {
+    this.closedStack = Array.isArray(stack) ? stack.slice(-MAX_CLOSED) : [];
+  }
+
+  /**
+   * The pages of the "open specific pages" startup mode. Only the first one
+   * boots a renderer: the others are born discarded (deferLoad) and materialize
+   * when the user actually clicks them, exactly like a restored session.
+   */
+  openStartupUrls(urls: string[]): void {
+    const list = urls.filter((u) => u.trim().length > 0);
+    if (list.length === 0) {
+      this.create();
+      return;
+    }
+    list.forEach((url, i) => {
+      // `title: url` so a deferred tab reads as its page instead of "Nouvel
+      // onglet" until its first activation.
+      this.create(url, { activate: false, title: url, deferLoad: i !== 0 });
+    });
+    const first = this.tabs[0];
+    if (first) this.setActive(first.id);
   }
 
   private htmlFullscreen = false;

@@ -94,11 +94,42 @@ describe('settings storage', () => {
     expect(ext.getSettings().homepage).toBe('https://example.com');
   });
 
+  describe('startupMode migration (0.3 -> 0.4)', () => {
+    it('keeps session restore for a profile that already existed', async () => {
+      // Until 0.4 Voksa restored the previous session unconditionally. The new
+      // DEFAULT is 'newtab', and applying it to an existing profile would look,
+      // to that user, exactly like the browser losing every tab on an update.
+      fs.writeFileSync(settingsFile(), JSON.stringify({ theme: 'dark' }), 'utf8');
+      const { getSettings } = await freshImport();
+      expect(getSettings().startupMode).toBe('restore');
+    });
+
+    it('gives a brand-new profile the new default', async () => {
+      const { getSettings } = await freshImport();
+      expect(getSettings().startupMode).toBe('newtab');
+    });
+
+    it('never overrides an explicit choice, and never re-runs on a later write', async () => {
+      fs.writeFileSync(
+        settingsFile(),
+        JSON.stringify({ theme: 'dark', startupMode: 'newtab' }),
+        'utf8',
+      );
+      const { getSettings, setSettings } = await freshImport();
+      expect(getSettings().startupMode).toBe('newtab');
+      // The migration lives in load(), not sanitize(): a write must not resurrect it.
+      setSettings({ theme: 'light' });
+      expect(getSettings().startupMode).toBe('newtab');
+    });
+  });
+
   it('sanitizes unknown enum values back to defaults, keeping valid fields', async () => {
     fs.writeFileSync(
       settingsFile(),
       JSON.stringify({
-        searchEngine: 'bing',
+        // Not a shipped engine id (a hand-edited file, or one written by a
+        // future version whose engine we removed).
+        searchEngine: 'askjeeves',
         theme: 'sepia',
         language: 'de',
         homepage: 'https://example.com',

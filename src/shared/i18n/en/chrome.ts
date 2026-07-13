@@ -35,6 +35,8 @@ export const enChrome: Record<string, string> = {
   // AddressBar/AddressBar.tsx
   'Paramètres du site': 'Site settings',
   'Recherchez ou saisissez une URL': 'Search or enter a URL',
+  'Rechercher sur {engine}': 'Search {engine}',
+  'Page interne de Voksa': 'Voksa internal page',
   'Retirer des favoris': 'Remove from bookmarks',
   // Same key as the native menu item (en/main.ts, which wins the merge):
   // both must carry the same value or one silently shadows the other.

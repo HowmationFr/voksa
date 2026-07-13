@@ -15,14 +15,35 @@ export const enSettings: Record<string, string> = {
   'Système suit la langue de votre ordinateur (français ou anglais).':
     'System follows your computer language (French or English).',
   'Moteur de recherche': 'Search engine',
-  'Utilisé quand la barre d’adresse ne contient pas une URL.':
-    'Used when the address bar does not contain a URL.',
+  'Utilisé quand la barre d’adresse ne contient pas une URL, et pour la recherche d’une sélection.':
+    'Used when the address bar does not contain a URL, and to search a selection.',
+  'Utilisé pour les recherches lancées depuis la barre d’adresse.':
+    'Used for searches started from the address bar.',
+  'Gérer les moteurs de recherche': 'Manage search engines',
+  'Mots-clés de la barre d’adresse : tapez « duckduckgo.com » puis Espace pour chercher directement sur DuckDuckGo.':
+    'Address bar keywords: type “duckduckgo.com” then Space to search DuckDuckGo directly.',
   'Page d’accueil': 'Home page',
   'Ouverte par le bouton Accueil et Alt+Home.': 'Opened by the Home button and Alt+Home.',
   'Barre de favoris': 'Bookmark bar',
   'Afficher la barre sous la barre d’adresse.': 'Show the bar below the address bar.',
+  // SettingsPage: on startup
+  'Au démarrage': 'On startup',
+  'Ce que Voksa ouvre au lancement.': 'What Voksa opens when it starts.',
+  'Ouvrir la page « Nouvel onglet »': 'Open the New Tab page',
+  'Reprendre là où vous vous étiez arrêté': 'Continue where you left off',
+  'Ouvrir une page ou un ensemble de pages spécifiques':
+    'Open a specific page or set of pages',
+  'Pages à ouvrir': 'Pages to open',
+  'Utiliser les pages actuelles': 'Use current pages',
+  'Aucune page : Voksa ouvrira un nouvel onglet.':
+    'No pages: Voksa will open a new tab.',
+
+  // SettingsPage: performance (speed)
+  'Vitesse': 'Speed',
+  'Voksa résout le DNS et ouvre la connexion des sites que vous survolez, pour que la page s’affiche plus vite au clic. Aucune page n’est téléchargée à l’avance.':
+    'Voksa resolves DNS and opens the connection to sites you hover, so the page appears faster when you click. No page is downloaded ahead of time.',
+
   // SettingsPage: shell (sidebar + search)
-  'Recherche et démarrage': 'Search and startup',
   'Confidentialité et sécurité': 'Privacy and security',
   'Rechercher un paramètre': 'Search settings',
   'Effacer la recherche': 'Clear the search',

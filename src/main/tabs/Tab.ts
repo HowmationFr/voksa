@@ -456,6 +456,8 @@ export class Tab {
         return 'Extensions';
       case 'voksa://credits':
         return 'Crédits';
+      case 'voksa://search':
+        return 'Moteurs de recherche';
       default:
         return 'Nouvel onglet';
     }

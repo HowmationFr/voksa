@@ -7,6 +7,7 @@ import { StreamPage } from './StreamPage';
 import { DownloadsPage } from './Downloads';
 import { ExtensionsPage } from './Extensions';
 import { CreditsPage } from './Credits';
+import { SearchEnginesPage } from './SearchEngines';
 
 export type Slug =
   | 'newtab'
@@ -16,7 +17,8 @@ export type Slug =
   | 'stream'
   | 'downloads'
   | 'extensions'
-  | 'credits';
+  | 'credits'
+  | 'search';
 
 type Props = { slug: Slug };
 
@@ -40,5 +42,7 @@ export function InternalPage({ slug }: Props): React.ReactElement {
       return <ExtensionsPage key="extensions" />;
     case 'credits':
       return <CreditsPage key="credits" />;
+    case 'search':
+      return <SearchEnginesPage key="search" />;
   }
 }

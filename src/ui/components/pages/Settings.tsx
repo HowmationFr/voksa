@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Bug,
   CheckCircle2,
@@ -10,6 +10,7 @@ import {
   Monitor,
   Moon,
   Palette,
+  Power,
   Puzzle,
   Search as SearchIcon,
   Settings as SettingsIcon,
@@ -20,6 +21,12 @@ import {
   X,
   Youtube,
 } from 'lucide-react';
+import {
+  getEngine,
+  resolveEngines,
+  type SearchEngineDef,
+} from '../../../shared/searchEngines';
+import type { StartupMode } from '../../../shared/startup';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useStreamStore } from '../../stores/streamStore';
 import { useTabsStore } from '../../stores/tabsStore';
@@ -38,12 +45,22 @@ const YOUTUBE_URL = 'https://www.youtube.com/@Howmation';
 const GITHUB_URL = 'https://github.com/HowmationFr/voksa';
 const ISSUES_URL = 'https://github.com/HowmationFr/voksa/issues';
 
-const ENGINES = [
-  { value: 'google', label: 'Google' },
-  { value: 'duckduckgo', label: 'DuckDuckGo' },
-  { value: 'startpage', label: 'Startpage' },
-  { value: 'brave', label: 'Brave' },
-] as const;
+/**
+ * The three startup modes. `label` takes the translator as an argument so the
+ * French source string stays a LITERAL inside the translation call, which is
+ * what the i18n contract test scans for. Storing a pre-translated string here,
+ * or a key resolved through a variable, would both need to be registered as an
+ * indirection. Neither is worth it.
+ */
+const STARTUP_CHOICES: Array<{
+  mode: StartupMode;
+  label: (t: (s: string) => string) => string;
+}> = [
+  { mode: 'newtab', label: (t) => t('Ouvrir la page « Nouvel onglet »') },
+  { mode: 'restore', label: (t) => t('Reprendre là où vous vous étiez arrêté') },
+  { mode: 'urls', label: (t) => t('Ouvrir une page ou un ensemble de pages spécifiques') },
+];
+
 
 /**
  * One settings row. `label`/`description` are ALREADY translated: callers pass
@@ -95,11 +112,15 @@ export function SettingsPage(): React.ReactElement {
   const dormantTabs = useTabsStore((s) => s.tabs.filter((t) => t.isDiscarded).length);
 
   const [clearDataOpen, setClearDataOpen] = useState(false);
+  const [engineDialogOpen, setEngineDialogOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeSection, setActiveSection] = useState('appearance');
-  const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
 
   const openInternal = useNavigateActiveTab();
+  const engines = useMemo(
+    () => resolveEngines(settings.customEngines),
+    [settings.customEngines],
+  );
 
   const sections: Section[] = [
     {
@@ -152,34 +173,87 @@ export function SettingsPage(): React.ReactElement {
     },
     {
       id: 'search',
-      title: t('Recherche et démarrage'),
+      title: t('Moteur de recherche'),
       icon: SearchIcon,
       rows: [
         {
           key: 'engine',
           label: t('Moteur de recherche'),
-          description: t('Utilisé quand la barre d’adresse ne contient pas une URL.'),
-          keywords: 'google duckduckgo brave startpage',
+          description: t(
+            'Utilisé quand la barre d’adresse ne contient pas une URL, et pour la recherche d’une sélection.',
+          ),
+          keywords: 'google bing duckduckgo brave qwant ecosia startpage',
           control: (
-            <select
-              value={settings.searchEngine}
-              onChange={(e) =>
-                void update({ searchEngine: e.target.value as typeof settings.searchEngine })
-              }
-              className="bg-bg-inset border border-border rounded-lg px-3 h-9 text-sm"
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-fg">{getEngine(settings.searchEngine, engines).name}</span>
+              <button
+                type="button"
+                onClick={() => setEngineDialogOpen(true)}
+                className="px-3 h-9 rounded-lg text-sm text-fg hover:bg-bg-hover border border-border transition-colors"
+              >
+                {t('Modifier')}
+              </button>
+            </div>
+          ),
+        },
+        {
+          key: 'manage-engines',
+          label: t('Gérer les moteurs de recherche'),
+          description: t(
+            'Mots-clés de la barre d’adresse : tapez « duckduckgo.com » puis Espace pour chercher directement sur DuckDuckGo.',
+          ),
+          keywords: 'raccourci mot-cle keyword gerer',
+          control: (
+            <button
+              type="button"
+              onClick={() => openInternal('voksa://search')}
+              aria-label={t('Gérer les moteurs de recherche')}
+              className="flex items-center justify-center w-9 h-9 rounded-lg text-fg-muted hover:bg-bg-hover transition-colors"
             >
-              {ENGINES.map((e) => (
-                <option key={e.value} value={e.value}>
-                  {e.label}
-                </option>
+              <ChevronRight size={18} />
+            </button>
+          ),
+        },
+      ],
+    },
+    {
+      id: 'startup',
+      title: t('Au démarrage'),
+      icon: Power,
+      rows: [
+        {
+          key: 'startup-mode',
+          label: t('Au démarrage'),
+          description: t('Ce que Voksa ouvre au lancement.'),
+          // The URL list is a CARD, and a card that only exists in 'urls' mode
+          // is invisible to the filter in the other two. Its terms live here so
+          // searching "pages à ouvrir" still finds the section that owns it.
+          keywords: `demarrage session onglets restaurer reprendre ${t('Pages à ouvrir')} urls`,
+          control: (
+            <div className="flex flex-col gap-1.5">
+              {STARTUP_CHOICES.map((choice) => (
+                <label
+                  key={choice.mode}
+                  className="flex items-center gap-2.5 cursor-pointer text-sm text-fg"
+                >
+                  <input
+                    type="radio"
+                    name="startup-mode"
+                    checked={settings.startupMode === choice.mode}
+                    onChange={() => void update({ startupMode: choice.mode })}
+                    className="accent-accent"
+                  />
+                  {choice.label(t)}
+                </label>
               ))}
-            </select>
+            </div>
           ),
         },
         {
           key: 'homepage',
           label: t('Page d’accueil'),
           description: t('Ouverte par le bouton Accueil et Alt+Home.'),
+          keywords: 'accueil home',
           control: (
             <input
               value={settings.homepage}
@@ -190,6 +264,16 @@ export function SettingsPage(): React.ReactElement {
           ),
         },
       ],
+      cardKeywords: `${t('Pages à ouvrir')} urls pages specifiques`,
+      // Only when the mode calls for it: an empty URL list sitting under two
+      // unselected radio buttons would just be noise.
+      card:
+        settings.startupMode === 'urls' ? (
+          <StartupUrlsEditor
+            urls={settings.startupUrls}
+            onChange={(urls) => void update({ startupUrls: urls })}
+          />
+        ) : undefined,
     },
     {
       id: 'performance',
@@ -214,6 +298,20 @@ export function SettingsPage(): React.ReactElement {
               <option value="balanced">{t('Équilibré')}</option>
               <option value="maximum">{t('Maximal')}</option>
             </select>
+          ),
+        },
+        {
+          key: 'preconnect',
+          label: t('Vitesse'),
+          description: t(
+            'Voksa résout le DNS et ouvre la connexion des sites que vous survolez, pour que la page s’affiche plus vite au clic. Aucune page n’est téléchargée à l’avance.',
+          ),
+          keywords: 'vitesse rapide dns preconnexion reseau latence',
+          control: (
+            <Toggle
+              checked={settings.preconnect}
+              onChange={(v) => void update({ preconnect: v })}
+            />
           ),
         },
         {
@@ -318,7 +416,8 @@ export function SettingsPage(): React.ReactElement {
   ];
 
   const q = query.trim().toLowerCase();
-  const visible = sections
+
+  const matching = sections
     .map((section) => ({
       section,
       rows: q ? section.rows.filter((row) => rowMatches(section, row, q)) : section.rows,
@@ -328,29 +427,16 @@ export function SettingsPage(): React.ReactElement {
     }))
     .filter(({ rows, showCard }) => rows.length > 0 || showCard);
 
-  // Scroll-spy: highlight the section the user is actually looking at.
-  useEffect(() => {
-    if (q) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const shown = entries
-          .filter((e) => e.isIntersecting)
-          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
-        if (shown?.target.id) setActiveSection(shown.target.id);
-      },
-      { rootMargin: '-80px 0px -60% 0px', threshold: 0 },
-    );
-    for (const el of Object.values(sectionRefs.current)) if (el) observer.observe(el);
-    return () => observer.disconnect();
-  }, [q, visible.length]);
+  // One section at a time: the sidebar is navigation, not a table of contents.
+  // Searching is the exception, and the only one: a query is a question about
+  // the WHOLE of the settings, so it answers across every section at once.
+  const visible = q
+    ? matching
+    : matching.filter(({ section }) => section.id === activeSection);
 
   const goTo = (id: string) => {
     setQuery('');
-    // The scroll container is Chrome.tsx's overflow-y-auto wrapper, so a plain
-    // scrollIntoView on the section does the right thing.
-    requestAnimationFrame(() => {
-      sectionRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
+    setActiveSection(id);
   };
 
   return (
@@ -371,6 +457,7 @@ export function SettingsPage(): React.ReactElement {
                   return (
                     <button
                       key={s.id}
+                      data-voksa-settings-nav={s.id}
                       onClick={() => goTo(s.id)}
                       className={`w-full flex items-center gap-2.5 px-3 h-9 rounded-lg text-sm transition-colors text-left ${
                         current
@@ -418,14 +505,7 @@ export function SettingsPage(): React.ReactElement {
               visible.map(({ section, rows, showCard }) => {
                 const Icon = section.icon;
                 return (
-                  <section
-                    key={section.id}
-                    id={section.id}
-                    ref={(el) => {
-                      sectionRefs.current[section.id] = el;
-                    }}
-                    className="mb-10 scroll-mt-6"
-                  >
+                  <section key={section.id} id={section.id} className="mb-10">
                     <h2 className="flex items-center gap-2 text-sm font-semibold text-fg mb-3">
                       <Icon size={15} className="text-fg-muted" />
                       {section.title}
@@ -456,6 +536,101 @@ export function SettingsPage(): React.ReactElement {
         </div>
 
         {clearDataOpen && <ClearDataDialog onClose={() => setClearDataOpen(false)} />}
+        {engineDialogOpen && (
+          <SearchEngineDialog
+            engines={engines}
+            current={settings.searchEngine}
+            onPick={(id) => {
+              void update({ searchEngine: id });
+              setEngineDialogOpen(false);
+            }}
+            onClose={() => setEngineDialogOpen(false)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Default-engine picker, Chrome's "Search engine" dialog.
+ *
+ * No overlay refcount to thread (CLAUDE.md 4.8): an internal page already runs
+ * with the chromeView expanded full-window, so a modal rendered inside one has
+ * nothing to clip against. ClearDataDialog does exactly the same.
+ */
+function SearchEngineDialog({
+  engines,
+  current,
+  onPick,
+  onClose,
+}: {
+  engines: SearchEngineDef[];
+  current: string;
+  onPick: (id: string) => void;
+  onClose: () => void;
+}): React.ReactElement {
+  const t = useT();
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-[420px] max-h-[80vh] flex flex-col bg-bg-elevated border border-border rounded-2xl shadow-xl overflow-hidden"
+      >
+        <div className="px-5 pt-5 pb-3">
+          <h2 className="text-base font-semibold text-fg">{t('Moteur de recherche')}</h2>
+          <p className="text-xs text-fg-muted mt-1">
+            {t('Utilisé pour les recherches lancées depuis la barre d’adresse.')}
+          </p>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-2 pb-2">
+          {engines.map((engine) => {
+            const selected = engine.id === current;
+            return (
+              <button
+                key={engine.id}
+                type="button"
+                onClick={() => onPick(engine.id)}
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-bg-hover transition-colors text-left"
+              >
+                <span
+                  className={`flex-shrink-0 w-4 h-4 rounded-full border-2 transition-colors ${
+                    selected ? 'border-accent bg-accent' : 'border-border-strong'
+                  }`}
+                />
+                <span className="flex-1 min-w-0 text-sm text-fg">{engine.name}</span>
+                {/* The keyword IS the feature: showing it here is how anyone
+                    ever discovers tab-to-search. */}
+                <span className="flex-shrink-0 text-[11px] font-mono text-fg-subtle">
+                  {engine.keyword}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex justify-end gap-2 px-5 py-3 border-t border-border">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 h-9 rounded-lg text-sm text-fg hover:bg-bg-hover border border-border transition-colors"
+          >
+            {t('Annuler')}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -535,6 +710,98 @@ function BigCard({
 }
 
 /** Hosts the Memory Saver must never put to sleep. */
+/**
+ * The pages of the "open specific pages" startup mode.
+ *
+ * Entries are stored RAW, exactly as typed, like the homepage setting is: the
+ * main process runs them through normalizeInput when it opens them, so "hello"
+ * becomes a search and "example.com" becomes a site, with no second set of
+ * rules to keep in step with the address bar.
+ */
+function StartupUrlsEditor({
+  urls,
+  onChange,
+}: {
+  urls: string[];
+  onChange: (urls: string[]) => void;
+}): React.ReactElement {
+  const t = useT();
+  const tabs = useTabsStore((s) => s.tabs);
+  const [input, setInput] = useState('');
+
+  const add = () => {
+    const url = input.trim();
+    if (!url || urls.includes(url)) {
+      setInput('');
+      return;
+    }
+    onChange([...urls, url]);
+    setInput('');
+  };
+
+  const useCurrentTabs = () => {
+    const open = tabs.filter((tab) => !tab.isInternal).map((tab) => tab.url);
+    const merged = [...urls];
+    for (const url of open) if (!merged.includes(url)) merged.push(url);
+    onChange(merged);
+  };
+
+  return (
+    <div className="bg-bg-elevated border border-border rounded-xl overflow-hidden">
+      <div className="flex items-center gap-2 p-4 border-b border-border">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              add();
+            }
+          }}
+          placeholder="https://exemple.com"
+          className="flex-1 h-9 px-3 rounded-lg bg-bg border border-border text-sm outline-none focus:border-accent/60"
+        />
+        <button
+          type="button"
+          onClick={add}
+          disabled={!input.trim()}
+          className="flex-shrink-0 px-3 h-9 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {t('Ajouter')}
+        </button>
+        <button
+          type="button"
+          onClick={useCurrentTabs}
+          className="flex-shrink-0 px-3 h-9 rounded-lg text-sm text-fg hover:bg-bg-hover border border-border transition-colors"
+        >
+          {t('Utiliser les pages actuelles')}
+        </button>
+      </div>
+      {urls.length === 0 ? (
+        <div className="px-4 py-6 text-center text-xs text-fg-subtle">
+          {t('Aucune page : Voksa ouvrira un nouvel onglet.')}
+        </div>
+      ) : (
+        <ul className="divide-y divide-border">
+          {urls.map((url) => (
+            <li key={url} className="flex items-center gap-3 px-4 py-2.5">
+              <span className="flex-1 min-w-0 text-[13px] text-fg truncate">{url}</span>
+              <button
+                type="button"
+                onClick={() => onChange(urls.filter((u) => u !== url))}
+                aria-label={t('Retirer {host}', { host: url })}
+                className="flex-shrink-0 flex items-center justify-center w-7 h-7 rounded-lg text-fg-muted hover:text-danger hover:bg-danger/10 transition-colors"
+              >
+                <X size={13} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function ExceptionsEditor({
   hosts,
   onChange,

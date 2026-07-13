@@ -13,6 +13,7 @@ import {
 import { useSettingsStore } from '../../stores/settingsStore';
 import { SettingsBackLink } from './SettingsBackLink';
 import { useT } from '../../lib/i18n';
+import { useMaskedText } from '../../lib/masking';
 
 /**
  * voksa://search: the engines Voksa ships, the ones the user added, and their
@@ -144,16 +145,23 @@ function EngineRow({
   onRemove: () => void;
 }): React.ReactElement {
   const t = useT();
+  // A custom engine is user text: its name can be a client's, its keyword and
+  // URL can carry a private hostname. Internal pages are painted surfaces like
+  // any other (CLAUDE.md 4.5), so they go through the same mask. Applied to
+  // built-ins too rather than branching on `custom`: masking "Google" is the
+  // identity, and one path means no bypass to keep in step later.
+  const name = useMaskedText(engine.name);
+  const keyword = useMaskedText(engine.keyword);
 
   return (
     <div className="flex items-center gap-4 px-4 py-3">
       <span className="flex-1 min-w-0 text-sm text-fg truncate">
-        {engine.name}
+        {name}
         {isDefault ? (
           <span className="ml-2 text-xs text-fg-muted">{t('(par défaut)')}</span>
         ) : null}
       </span>
-      <span className="w-44 text-[12px] font-mono text-fg-muted truncate">{engine.keyword}</span>
+      <span className="w-44 text-[12px] font-mono text-fg-muted truncate">{keyword}</span>
       <span className="w-40 flex justify-end items-center gap-1">
         {!isDefault && (
           <button
@@ -229,13 +237,15 @@ function EngineDialog({
       ? t('Donnez un nom à ce moteur.')
       : problem === 'keyword'
         ? t('Choisissez un mot-clé (ce que vous taperez dans la barre d’adresse).')
-        : problem === 'keyword-taken'
-          ? t('Ce mot-clé est déjà utilisé par un autre moteur.')
-          : problem === 'url'
-            ? t('L’URL doit commencer par https://.')
-            : problem === 'url-placeholder'
-              ? t('L’URL doit contenir %s à l’endroit de la recherche.')
-              : null;
+        : problem === 'keyword-space'
+          ? t('Un mot-clé ne peut pas contenir d’espace : c’est l’espace qui le déclenche.')
+          : problem === 'keyword-taken'
+            ? t('Ce mot-clé est déjà utilisé par un autre moteur.')
+            : problem === 'url'
+              ? t('L’URL doit commencer par https://.')
+              : problem === 'url-placeholder'
+                ? t('L’URL doit contenir %s à l’endroit de la recherche.')
+                : null;
 
   return (
     <div

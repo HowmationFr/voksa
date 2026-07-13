@@ -143,10 +143,28 @@ describe('custom engines', () => {
     expect(engines.filter((e) => e.custom).map((e) => e.id)).toEqual(['custom:1']);
   });
 
-  it('normalizes the keyword the way the address bar compares it', () => {
-    expect(normalizeKeyword('  Wiki Pedia.ORG ')).toBe('wikipedia.org');
+  it('normalizes the keyword the way the address bar compares it: case and edges only', () => {
+    expect(normalizeKeyword('  WIKIPEDIA.ORG ')).toBe('wikipedia.org');
     const engines = resolveEngines([{ ...WIKI, keyword: ' WIKIPEDIA.ORG ' }]);
     expect(findEngineByKeyword('wikipedia.org', engines)?.id).toBe('custom:1');
+  });
+
+  it('refuses a keyword with a space instead of silently rewriting it', () => {
+    // normalizeKeyword used to strip inner spaces, so "my wiki" was quietly
+    // persisted as `mywiki`: a keyword the user never chose. And because the
+    // same function normalized the TYPED text, the comparison became fuzzy.
+    expect(normalizeKeyword('my wiki')).toBe('my wiki');
+    expect(
+      validateCustomEngine(
+        { name: 'Wiki', keyword: 'my wiki', searchUrl: 'https://x/%s' },
+        BUILTIN_ENGINES,
+      ),
+    ).toBe('keyword-space');
+    // Fail closed: a hand-edited settings.json carrying one is dropped, not
+    // half-honoured into some other keyword.
+    expect(
+      resolveEngines([{ ...WIKI, keyword: 'my wiki' }]).filter((e) => e.custom),
+    ).toEqual([]);
   });
 
   it('caps the list and keeps ids unique', () => {
@@ -174,6 +192,25 @@ describe('findEngineByKeyword: the tab-to-search trigger', () => {
     expect(findEngineByKeyword('DuckDuckGo.COM')?.id).toBe('duckduckgo');
     expect(findEngineByKeyword('example.com')).toBeNull();
     expect(findEngineByKeyword('')).toBeNull();
+  });
+
+  it('never matches typed text whose SPACES are what make it look like a keyword', () => {
+    // The regression this pins: findEngineByKeyword ran the typed text through a
+    // canonicalizer that stripped inner whitespace, so a phrase collapsed into a
+    // keyword. With a custom engine keyed `github`, typing "git hub " armed the
+    // chip and WIPED "git hub" from the address bar; whatever came next was sent
+    // to GitHub instead of the user's default engine. The mode was still state,
+    // but the trigger had silently become an inference -- the exact failure the
+    // keyword-as-state design exists to prevent.
+    const engines = resolveEngines([
+      { id: 'custom:1', name: 'GitHub', keyword: 'github', searchUrl: 'https://github.com/s?q=%s' },
+    ]);
+    expect(findEngineByKeyword('github', engines)?.id).toBe('custom:1');
+    expect(findEngineByKeyword('git hub ', engines)).toBeNull();
+    expect(findEngineByKeyword('git hub', engines)).toBeNull();
+    // Built-ins are reachable the same way, and must be just as safe.
+    expect(findEngineByKeyword('goo gle.com ')).toBeNull();
+    expect(findEngineByKeyword('bing. com')).toBeNull();
   });
 
   it('is NOT a line parser: a phrase that merely starts with a keyword is not a match', () => {

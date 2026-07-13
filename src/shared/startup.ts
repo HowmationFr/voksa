@@ -25,18 +25,42 @@ export function isStartupMode(value: unknown): value is StartupMode {
   return typeof value === 'string' && (STARTUP_MODES as readonly string[]).includes(value);
 }
 
+/**
+ * Two entries that will open the same page are the same entry, however they
+ * were typed. Startup URLs are stored RAW (like homepage) and only turned into
+ * real URLs by normalizeInput at open time, so a dedupe over the raw strings
+ * misses the obvious pair: "example.com" and "https://example.com" are two
+ * different strings and one identical page, and both would open, at every
+ * launch, forever.
+ */
+function dedupeKey(url: string): string {
+  return url
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '');
+}
+
 /** Trim, drop empties and duplicates, cap the count. Stored raw (like homepage): normalizeInput turns them into URLs at open time. */
 export function sanitizeStartupUrls(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   const out: string[] = [];
+  const seen = new Set<string>();
   for (const entry of raw) {
     if (typeof entry !== 'string') continue;
     const url = entry.trim();
-    if (!url || out.includes(url)) continue;
+    if (!url) continue;
+    const key = dedupeKey(url);
+    if (seen.has(key)) continue;
+    seen.add(key);
     out.push(url);
     if (out.length >= MAX_STARTUP_URLS) break;
   }
   return out;
+}
+
+/** True when the list is full: the editor must stop accepting, not let sanitize() silently drop. */
+export function startupUrlsFull(urls: readonly string[]): boolean {
+  return urls.length >= MAX_STARTUP_URLS;
 }
 
 /** A window snapshot, as far as the startup decision is concerned. */

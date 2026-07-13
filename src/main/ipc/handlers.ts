@@ -618,12 +618,22 @@ export function registerIpcHandlers(): void {
         return true;
       });
 
-      // Warm what Enter is most likely to open. Computed on the FINAL list, so
-      // an origin dropped by the Stream Mode history filter is never warmed
-      // either: what the user asked us not to use, we do not use.
+      // Warm what Enter is most likely to open, but only origins we KNOW exist:
+      // a history or bookmark hit is somewhere the user has actually been.
+      //
+      // Not suggestions[0]: that entry is always the literal text being typed,
+      // and a domain typed character by character is a different origin at every
+      // keystroke ("example.c", "example.co", "example.com"). Warming those
+      // sprays NXDOMAIN lookups, hands the DNS resolver a keystroke-by-keystroke
+      // picture of what is being typed, and burns the rate budget that the hover
+      // path -- the one genuinely strong signal -- depends on.
+      //
+      // Computed on the FINAL list, so an origin dropped by the Stream Mode
+      // history filter is never warmed either: what the user asked us not to
+      // use, we do not use.
       const preconnect = getPreconnect();
-      const first = suggestions[0];
-      if (first) preconnect.hint(first.url, 'resolve');
+      const known = suggestions.find((s) => s.kind === 'history' || s.kind === 'bookmark');
+      if (known) preconnect.hint(known.url, 'resolve');
       // The search engine itself: pressing Enter on a query is the single most
       // frequent thing anyone does in an address bar.
       if (!looksLikeUrl) preconnect.hint(buildSearchUrl(engine, ''), 'preconnect');
@@ -699,8 +709,12 @@ export function registerIpcHandlers(): void {
       }
       // The warmed-origin map is a record of what the user hovered and typed:
       // wiping browsing data must wipe it too, or "clear my data" would be a
-      // half-truth held in main-process memory.
-      if (opts.cache || opts.cookies || opts.history) getPreconnect().clear();
+      // half-truth held in main-process memory. Unconditional, whichever boxes
+      // were ticked: it was gated on cache/cookies/history, so clearing only
+      // site data (or permissions, or downloads) left the record standing, and
+      // the gate bought nothing -- dropping a small in-memory map costs nothing
+      // and there is no box under which keeping it would be the right answer.
+      getPreconnect().clear();
     },
   );
   ipcMain.handle(IPC.APP_OPEN_DEVTOOLS, (e) => {

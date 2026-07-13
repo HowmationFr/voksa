@@ -54,6 +54,7 @@ export const enMain: Record<string, string> = {
   // Address bar suggestions built in main (ipc/handlers.ts)
   'Aller à {query}': 'Go to {query}',
   'Rechercher « {query} »': 'Search for "{query}"',
+  'Rechercher « {query} » sur {engine}': 'Search {engine} for "{query}"',
 
   // Google OAuth fallback popup (oauth/GoogleOAuthBridge.ts)
   'Connexion Google': 'Google sign-in',

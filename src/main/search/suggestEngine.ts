@@ -1,43 +1,15 @@
 import { net } from 'electron';
-import type { AppSettings } from '../../shared/types';
-
-type Engine = AppSettings['searchEngine'];
-
-type EngineConfig = {
-  suggestUrl: ((q: string) => string) | null;
-  parse: (data: unknown) => string[];
-};
+import type { SearchEngineDef } from '../../shared/searchEngines';
 
 /**
- * Each search engine exposes its autocomplete via a slightly different JSON
- * shape. All three of Google / DDG / Brave follow the de-facto `opensearch
- * suggestion` convention of returning `[query, [suggestions...]]`, but we
- * still wrap parsing so a change on their side doesn't crash the address
- * bar; we just fall back to "no suggestions".
+ * Every engine that publishes an autocomplete endpoint speaks the de-facto
+ * OpenSearch convention: `[query, [suggestions...]]`. Parsing still goes
+ * through a tolerant reader so a change on their side degrades to "no
+ * suggestions" rather than crashing the address bar.
  *
- * Startpage has no stable public suggest endpoint; we return an empty list
- * for it and rely on history + bookmarks.
+ * Engines with no usable public endpoint (Startpage, Qwant, Ecosia) declare
+ * `suggestUrl: null` in the registry and fall back to history + bookmarks.
  */
-const ENGINES: Record<Engine, EngineConfig> = {
-  google: {
-    suggestUrl: (q) =>
-      `https://suggestqueries.google.com/complete/search?client=firefox&q=${encodeURIComponent(q)}`,
-    parse: (data) => extractOpenSearchSuggestions(data),
-  },
-  duckduckgo: {
-    suggestUrl: (q) => `https://duckduckgo.com/ac/?q=${encodeURIComponent(q)}&type=list`,
-    parse: (data) => extractOpenSearchSuggestions(data),
-  },
-  brave: {
-    suggestUrl: (q) => `https://search.brave.com/api/suggest?q=${encodeURIComponent(q)}`,
-    parse: (data) => extractOpenSearchSuggestions(data),
-  },
-  startpage: {
-    suggestUrl: null,
-    parse: () => [],
-  },
-};
-
 function extractOpenSearchSuggestions(data: unknown): string[] {
   if (!Array.isArray(data)) return [];
   const second = data[1];
@@ -66,14 +38,15 @@ function extractOpenSearchSuggestions(data: unknown): string[] {
  * return `[]`: suggestions are best-effort, never fatal.
  */
 export async function fetchSearchSuggestions(
-  engine: Engine,
+  engine: SearchEngineDef,
   query: string,
   signal?: AbortSignal,
 ): Promise<string[]> {
-  const cfg = ENGINES[engine] ?? ENGINES.google;
-  if (!cfg.suggestUrl) return [];
+  // A custom engine has no endpoint we could know: suggestUrl is null and the
+  // dropdown falls back to history and bookmarks, which is honest.
+  if (!engine.suggestUrl) return [];
+  const url = engine.suggestUrl.replace('{q}', encodeURIComponent(query));
 
-  const url = cfg.suggestUrl(query);
   const timeout = AbortSignal.timeout(1200);
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
 
@@ -93,7 +66,7 @@ export async function fetchSearchSuggestions(
     const text = await res.text();
     const data = tolerantJsonParse(text);
     if (data === undefined) return [];
-    return cfg.parse(data).slice(0, 8);
+    return extractOpenSearchSuggestions(data).slice(0, 8);
   } catch {
     // Timed out, cancelled, or network failure: treat as no suggestions.
     return [];

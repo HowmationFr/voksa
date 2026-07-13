@@ -1,5 +1,7 @@
 import type { StreamModeConfig } from './streamConfig';
 import type { MemorySaverLevel } from './memorySaver';
+import type { CustomSearchEngine } from './searchEngines';
+import type { StartupMode } from './startup';
 
 export type TabError = {
   code: number;
@@ -190,7 +192,10 @@ export type ClearBrowsingDataOptions = {
 };
 
 export type AppSettings = {
-  searchEngine: 'google' | 'duckduckgo' | 'startpage' | 'brave';
+  /** A built-in engine id, or a custom one ('custom:1'). See shared/searchEngines.ts. */
+  searchEngine: string;
+  /** Engines the user added themselves (name, keyword, URL template with %s). */
+  customEngines: CustomSearchEngine[];
   theme: 'dark' | 'light' | 'system';
   /** UI language; 'system' follows the OS locale (French, else English). */
   language: 'system' | 'fr' | 'en';
@@ -207,6 +212,17 @@ export type AppSettings = {
   memorySaver: MemorySaverLevel;
   /** Hosts never discarded, even when idle (matched on a dot boundary). */
   memorySaverExceptions: string[];
+  /** What opens at launch: the new tab page, the previous session, or a list. */
+  startupMode: StartupMode;
+  /** Pages opened at launch when startupMode is 'urls' (raw, as typed). */
+  startupUrls: string[];
+  /**
+   * Warm the DNS + TCP + TLS connection to sites the user is about to visit
+   * (hovered links, top address-bar suggestion). Chrome's "standard
+   * preloading" tier. Nothing is downloaded: Electron exposes no prefetch or
+   * prerender API at all.
+   */
+  preconnect: boolean;
 };
 
 export type ExtensionInfo = {

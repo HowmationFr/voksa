@@ -2,7 +2,12 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { app, Menu, session, shell } from 'electron';
 import { applyUserAgentOverride } from './ua';
-import { createAppWindow, boundsAreVisible, type AppWindow } from './window';
+import {
+  createAppWindow,
+  boundsAreVisible,
+  type AppWindow,
+  type BootstrapOptions,
+} from './window';
 import { registerIpcHandlers, wireWindowIpc } from './ipc/handlers';
 import { buildApplicationMenu } from './menu';
 import { getStreamMode } from './stream-mode/StreamModeController';
@@ -17,7 +22,8 @@ import {
   windowCount,
 } from './windows';
 import { closeDb } from './storage/db';
-import { flushSettings } from './storage/settings';
+import { flushSettings, getSettings } from './storage/settings';
+import { pickStartupPlan } from '../shared/startup';
 import {
   loadSession,
   updateWindowSnapshot,
@@ -25,7 +31,6 @@ import {
   flushSession,
   beginRestore,
   endRestore,
-  type SessionWindow,
 } from './storage/session';
 
 // Pin userData explicitly (a productName change must never orphan a profile)
@@ -164,19 +169,19 @@ function wireSessionPersistence(win: AppWindow): void {
 
 /**
  * Create, register and boot one browser window.
- *  - `restore`: session entry to restore (boot path).
- *  - `url`: single tab to open instead of the default new-tab (second
- *    instance launch with a URL, chrome.windows.create, CLI link).
+ *
+ * `opts.open` says what it opens: the startup plan at boot ('restore' /
+ * 'urls' / 'newtab'), or a single 'url' for a second launch, an OS link or
+ * chrome.windows.create. `opts.saved` only ever supplies geometry and the
+ * recently-closed stack, unless the plan is 'restore'.
  */
-async function createWindow(opts?: {
-  restore?: SessionWindow | null;
-  url?: string;
-}): Promise<AppWindow> {
+async function createWindow(opts?: BootstrapOptions): Promise<AppWindow> {
   // Resolved BEFORE registering the new window: cascade new windows from the
   // currently focused one so they don't stack pixel-perfectly.
   const previous = focusedWindow();
   const win = await createAppWindow(chromeUA);
-  if (!opts?.restore && previous && !previous.window.isDestroyed()) {
+  const restoring = opts?.open.kind === 'restore';
+  if (!restoring && previous && !previous.window.isDestroyed()) {
     try {
       const b = previous.window.getBounds();
       const cascaded = { x: b.x + 28, y: b.y + 28, width: b.width, height: b.height };
@@ -190,7 +195,7 @@ async function createWindow(opts?: {
   registerWindow(win);
   wireWindowIpc(win);
   wireSessionPersistence(win);
-  await win.bootstrap(opts?.restore ?? null, opts?.url);
+  await win.bootstrap(opts ?? { open: { kind: 'newtab' } });
   return win;
 }
 
@@ -210,27 +215,49 @@ async function start() {
   chromeUA = applyUserAgentOverride();
   registerIpcHandlers();
   await setupChromeWebStore(session.defaultSession);
-  setWindowFactory((url?: string) => createWindow({ url }));
+  setWindowFactory((url?: string) =>
+    createWindow({ open: url ? { kind: 'url', url } : { kind: 'newtab' } }),
+  );
   Menu.setApplicationMenu(buildApplicationMenu(() => focusedWindow()));
 
-  // Restore every window of the previous run (v1 files migrate to one).
-  // Writes stay frozen until the whole set is back: the snapshot map fills
-  // one window at a time, so an intermediate write would erase the windows
-  // not yet booted. A window that fails to boot must not take the others
-  // down with it either: keep going, and guarantee at least one window.
+  // What opens now is the user's call (Settings > On startup). The session file
+  // is READ in every mode: even when the tabs stay closed, it carries the
+  // window geometry and the "recently closed" stack. It also keeps being
+  // WRITTEN in every mode, so switching back to "continue where you left off"
+  // later actually has something to restore.
+  //
+  // Writes stay frozen until the whole set is back: the snapshot map fills one
+  // window at a time, so an intermediate write would erase the windows not yet
+  // booted. A window that fails to boot must not take the others down with it
+  // either: keep going, and guarantee at least one window.
   const saved = loadSession();
+  const plan = pickStartupPlan(getSettings().startupMode, saved, getSettings().startupUrls);
   beginRestore();
   try {
-    if (saved && saved.windows.length > 0) {
+    if (plan.kind === 'restore' && saved) {
       for (const entry of saved.windows) {
         try {
-          await createWindow({ restore: entry });
+          await createWindow({ saved: entry, open: { kind: 'restore' } });
         } catch (err) {
           console.error('[main] window restore failed, skipping it:', err);
         }
       }
+    } else {
+      // One window, like Chrome: several windows only ever come back through a
+      // session restore. It still inherits the first one's geometry and stack.
+      const first = saved?.windows[0] ?? null;
+      try {
+        await createWindow({
+          saved: first,
+          open: plan.kind === 'urls' ? { kind: 'urls', urls: plan.urls } : { kind: 'newtab' },
+        });
+      } catch (err) {
+        // Same contract as the restore loop: a window that fails to boot must
+        // not skip the "at least one window" guarantee below.
+        console.error('[main] startup window failed, falling back to a new tab:', err);
+      }
     }
-    if (windowCount() === 0) await createWindow();
+    if (windowCount() === 0) await createWindow({ open: { kind: 'newtab' } });
   } finally {
     endRestore();
   }
@@ -271,7 +298,7 @@ app.on('second-instance', (_e, argv) => {
 
 /** New window for a launch request; failures are logged, never unhandled. */
 function openLaunchWindow(url?: string): void {
-  void createWindow({ url })
+  void createWindow({ open: url ? { kind: 'url', url } : { kind: 'newtab' } })
     .then((win) => {
       if (!win.window.isDestroyed()) win.window.focus();
     })

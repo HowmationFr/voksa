@@ -86,6 +86,30 @@ export const enPages: Record<string, string> = {
   'Réessayer': 'Retry',
   'Code {code}': 'Code {code}',
 
+  // voksa://search
+  'Moteurs de recherche': 'Search engines',
+  'Tapez le mot-clé d’un moteur dans la barre d’adresse, puis Espace, pour chercher directement dessus sans changer votre moteur par défaut.':
+    'Type an engine’s keyword in the address bar, then Space, to search it directly without changing your default engine.',
+  'Nom': 'Name',
+  'Mot-clé': 'Keyword',
+  '(par défaut)': '(default)',
+  'Définir par défaut': 'Make default',
+  'Ajouter un moteur de recherche': 'Add a search engine',
+  'Modifier le moteur de recherche': 'Edit search engine',
+  'URL avec %s à la place de la recherche': 'URL with %s in place of the query',
+  'Tapez ce mot-clé puis Espace dans la barre d’adresse.':
+    'Type this keyword then Space in the address bar.',
+  'Donnez un nom à ce moteur.': 'Give this engine a name.',
+  'Choisissez un mot-clé (ce que vous taperez dans la barre d’adresse).':
+    'Choose a keyword (what you will type in the address bar).',
+  'Ce mot-clé est déjà utilisé par un autre moteur.':
+    'That keyword is already used by another engine.',
+  'L’URL doit commencer par https://.': 'The URL must start with https://.',
+  'L’URL doit contenir %s à l’endroit de la recherche.':
+    'The URL must contain %s where the query goes.',
+  'Nombre maximal de moteurs personnalisés atteint ({n}).':
+    'Maximum number of custom engines reached ({n}).',
+
   // voksa://credits
   'Crédits': 'Credits',
   'Afficher toutes les licences': 'Show all licences',

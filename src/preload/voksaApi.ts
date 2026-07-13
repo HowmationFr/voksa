@@ -37,7 +37,9 @@ export function buildVoksaApi() {
       close: (id: string) => ipcRenderer.invoke(IPC.TAB_CLOSE, id),
       activate: (id: string) => ipcRenderer.invoke(IPC.TAB_ACTIVATE, id),
       reorder: (ids: string[]) => ipcRenderer.invoke(IPC.TAB_REORDER, ids),
-      navigate: (id: string, url: string) => ipcRenderer.invoke(IPC.TAB_NAVIGATE, id, url),
+      /** `engine`: tab-to-search override. `url` is then a QUERY for that engine, and MAIN builds the search URL (the renderer never does). */
+      navigate: (id: string, url: string, engine?: string) =>
+        ipcRenderer.invoke(IPC.TAB_NAVIGATE, id, url, engine),
       back: (id: string) => ipcRenderer.invoke(IPC.TAB_BACK, id),
       forward: (id: string) => ipcRenderer.invoke(IPC.TAB_FORWARD, id),
       reload: (id: string) => ipcRenderer.invoke(IPC.TAB_RELOAD, id),
@@ -136,7 +138,8 @@ export function buildVoksaApi() {
         on<StreamModeConfig>(IPC.STREAM_CONFIG_CHANGED, handler),
     },
     suggestions: {
-      query: (q: string): Promise<Suggestion[]> => ipcRenderer.invoke(IPC.SUGGESTIONS_QUERY, q),
+      query: (q: string, engine?: string): Promise<Suggestion[]> =>
+        ipcRenderer.invoke(IPC.SUGGESTIONS_QUERY, q, engine),
     },
     pageMenu: {
       onShow: (handler: (payload: PageMenuPayload) => void): Unsubscribe =>

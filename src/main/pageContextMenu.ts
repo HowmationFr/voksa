@@ -7,9 +7,9 @@ import {
 } from 'electron';
 import { IPC } from '../shared/ipcChannels';
 import type { PageMenuExtensionItem, PageMenuPayload } from '../shared/types';
-import { getSettings } from './storage/settings';
 import { getExtensionContextMenuItems } from './extensions/webstore';
-import { ENGINE_SEARCH_URLS } from '../shared/urlUtils';
+import { buildSearchUrl } from '../shared/searchEngines';
+import { defaultEngine } from './search/engines';
 import type { TabManager } from './tabs/TabManager';
 
 /**
@@ -162,9 +162,7 @@ export class PageMenuController {
       case 'search-selection': {
         const text = params.selectionText.trim();
         if (text) {
-          const engine = getSettings().searchEngine;
-          const prefix = ENGINE_SEARCH_URLS[engine] ?? ENGINE_SEARCH_URLS.google;
-          this.tabs.create(prefix + encodeURIComponent(text));
+          this.tabs.create(buildSearchUrl(defaultEngine(), text));
         }
         break;
       }

@@ -62,12 +62,14 @@ Voksa works the other way around: because it IS the browser, pages are kept invi
 | Starts with your recorder | No idea OBS exists | Detects OBS/Streamlabs/XSplit/vMix and switches on by itself |
 | Camera / mic / location prompts on stream | Still pop up | Auto-denied |
 
-## 🌐 Everything you expect from a real browser
+## 🌐 Your everyday browser
 
 - Sign in to **Google, Gmail and YouTube** normally.
 - Install extensions straight from the **Chrome Web Store**: uBlock Origin, Bitwarden and friends just work, cascading right-click menus included.
 - **Multiple windows**, nested **bookmark folders** with drag and drop, full **history** and search.
 - **Memory Saver**: inactive tabs give their memory back to your machine and reload where you left them, scroll position and half-filled forms included. Three levels, plus a list of sites to always keep alive.
+- **Search engines**: seven built in (Google, Bing, DuckDuckGo, Brave, Qwant, Ecosia, Startpage), plus your own, with `%s` standing in for the query. Every engine gets a **keyword**: type `duckduckgo.com`, hit Space, and search it without changing your default.
+- **On startup**, open the New Tab page, continue where you left off, or open a set of pages you choose.
 - **Downloads**, find in page, per-site **permission controls**, persistent zoom, print with live preview, session restore.
 - Full **dark mode** (light, dark, or follow the system).
 - **French and English**, detected from your system, switchable in Settings.

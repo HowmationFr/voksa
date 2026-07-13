@@ -13,6 +13,10 @@ import type {
   Suggestion,
 } from '../../shared/types';
 import { sameMaskingConfig, type StreamModeConfig } from '../../shared/streamConfig';
+import { buildSearchUrl } from '../../shared/searchEngines';
+import { currentEngines, defaultEngine } from '../search/engines';
+import { isUrlLike, normalizeInput } from '../../shared/urlUtils';
+import { getPreconnect } from '../perf/PreconnectController';
 import type { AppWindow } from '../window';
 import {
   allWindows,
@@ -212,9 +216,17 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.TAB_CLOSE, (e, id: string) => senderWindow(e)?.tabs.close(id));
   ipcMain.handle(IPC.TAB_ACTIVATE, (e, id: string) => senderWindow(e)?.tabs.setActive(id));
   ipcMain.handle(IPC.TAB_REORDER, (e, ids: string[]) => senderWindow(e)?.tabs.reorder(ids));
-  ipcMain.handle(IPC.TAB_NAVIGATE, (e, id: string, url: string) =>
-    senderWindow(e)?.tabs.navigate(id, url),
-  );
+  // `engine` is the tab-to-search override: the address bar is in keyword mode
+  // ("duckduckgo.com" + Space), so `url` is a QUERY for that engine, not an
+  // address. Main still builds every search URL: the renderer only names the
+  // engine it was told to use. Anything unknown falls back to plain input
+  // handling, so a hostile sender cannot inject a URL through this door.
+  ipcMain.handle(IPC.TAB_NAVIGATE, (e, id: string, url: string, engine?: string) => {
+    const engines = currentEngines();
+    const named = engine ? engines.find((def) => def.id === engine) : undefined;
+    const target = named ? buildSearchUrl(named, url.trim()) : url;
+    senderWindow(e)?.tabs.navigate(id, target);
+  });
   ipcMain.handle(IPC.TAB_BACK, (e, id: string) => senderWindow(e)?.tabs.back(id));
   ipcMain.handle(IPC.TAB_FORWARD, (e, id: string) => senderWindow(e)?.tabs.forward(id));
   ipcMain.handle(IPC.TAB_RELOAD, (e, id: string) => senderWindow(e)?.tabs.reload(id));
@@ -480,14 +492,9 @@ export function registerIpcHandlers(): void {
   // previous fetch as soon as a new query comes in.
   const inflightAborts = new Map<number, AbortController>();
 
-  const ENGINE_SEARCH_URLS: Record<AppSettings['searchEngine'], string> = {
-    google: 'https://www.google.com/search?q=',
-    duckduckgo: 'https://duckduckgo.com/?q=',
-    startpage: 'https://www.startpage.com/do/search?q=',
-    brave: 'https://search.brave.com/search?q=',
-  };
-
-  ipcMain.handle(IPC.SUGGESTIONS_QUERY, async (e, query: string): Promise<Suggestion[]> => {
+  ipcMain.handle(
+    IPC.SUGGESTIONS_QUERY,
+    async (e, query: string, engineOverride?: string): Promise<Suggestion[]> => {
     const trimmed = query.trim();
     if (!trimmed) return [];
 
@@ -505,27 +512,34 @@ export function registerIpcHandlers(): void {
     };
 
     try {
-      const settings = getSettings();
-      const engine = settings.searchEngine;
-      const searchUrlPrefix = ENGINE_SEARCH_URLS[engine];
+      // Tab-to-search: the address bar is in keyword mode, so `query` is terms
+      // for THAT engine, never an address. Chrome makes this an exclusive mode
+      // (no history, no bookmarks): the user named the engine, they want the
+      // engine. The mode is state the renderer holds, never inferred from the
+      // text here (see findEngineByKeyword).
+      const engines = currentEngines();
+      const named = engineOverride
+        ? engines.find((def) => def.id === engineOverride)
+        : undefined;
+      const keywordMode = Boolean(named);
+      const engine = named ?? defaultEngine();
 
-      const isUrlLike =
-        /^https?:\/\//i.test(trimmed) ||
-        /^[\w-]+(\.[\w-]+)+(:\d+)?(\/.*)?$/.test(trimmed) ||
-        trimmed === 'localhost';
+      const looksLikeUrl = !keywordMode && isUrlLike(trimmed);
 
       // Local DB lookups are synchronous (cheap, always included). Exception:
       // while streaming with hideHistory on, browsing habits must never
       // surface in the dropdown, so the history source is skipped entirely.
       const streamCfg = stream.getConfig();
       const hist =
-        streamCfg.enabled && streamCfg.hideHistory ? [] : searchHistory(trimmed, 4);
-      const marks = searchBookmarks(trimmed, 3);
+        keywordMode || (streamCfg.enabled && streamCfg.hideHistory)
+          ? []
+          : searchHistory(trimmed, 4);
+      const marks = keywordMode ? [] : searchBookmarks(trimmed, 3);
 
       // Network-bound engine autocomplete. Skip when the query already looks
       // like a URL: autocompleting "github.com/anthro" is not useful and
       // leaks the partial URL to the search engine unnecessarily.
-      const engineTerms = isUrlLike
+      const engineTerms = looksLikeUrl
         ? []
         : await fetchSearchSuggestions(engine, trimmed, abortController.signal);
 
@@ -536,22 +550,33 @@ export function registerIpcHandlers(): void {
       const out: Suggestion[] = [];
 
       // 1. The literal query the user typed (either as a URL to visit or a
-      //    search). Always first: it's what Enter is primed to do.
-      if (isUrlLike) {
+      //    search). Always first: it's what Enter is primed to do. The URL is
+      //    built by normalizeInput, the one funnel navigation itself uses, so
+      //    the suggestion and the Enter key can never disagree.
+      if (looksLikeUrl) {
         out.push({
           kind: 'url',
           label: t('Aller à {query}', { query: trimmed }),
-          url: /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`,
+          url: normalizeInput(trimmed, defaultEngine()),
+        });
+      } else if (keywordMode) {
+        out.push({
+          kind: 'search',
+          label: t('Rechercher « {query} » sur {engine}', {
+            query: trimmed,
+            engine: engine.name,
+          }),
+          url: buildSearchUrl(engine, trimmed),
         });
       } else {
         out.push({
           kind: 'search',
           label: t('Rechercher « {query} »', { query: trimmed }),
-          url: searchUrlPrefix + encodeURIComponent(trimmed),
+          url: buildSearchUrl(engine, trimmed),
         });
       }
 
-      // 2. Engine-suggested queries (Google / DDG / Brave).
+      // 2. Engine-suggested queries (from whichever engine is targeted).
       const queryLower = trimmed.toLowerCase();
       for (const term of engineTerms) {
         if (out.length >= 9) break;
@@ -561,7 +586,7 @@ export function registerIpcHandlers(): void {
         out.push({
           kind: 'search',
           label: term,
-          url: searchUrlPrefix + encodeURIComponent(term),
+          url: buildSearchUrl(engine, term),
         });
       }
 
@@ -587,15 +612,28 @@ export function registerIpcHandlers(): void {
 
       // De-dupe by URL while preserving insertion order (first-seen wins).
       const seen = new Set<string>();
-      return out.filter((s) => {
+      const suggestions = out.filter((s) => {
         if (seen.has(s.url)) return false;
         seen.add(s.url);
         return true;
       });
+
+      // Warm what Enter is most likely to open. Computed on the FINAL list, so
+      // an origin dropped by the Stream Mode history filter is never warmed
+      // either: what the user asked us not to use, we do not use.
+      const preconnect = getPreconnect();
+      const first = suggestions[0];
+      if (first) preconnect.hint(first.url, 'resolve');
+      // The search engine itself: pressing Enter on a query is the single most
+      // frequent thing anyone does in an address bar.
+      if (!looksLikeUrl) preconnect.hint(buildSearchUrl(engine, ''), 'preconnect');
+
+      return suggestions;
     } finally {
       releaseAbort();
     }
-  });
+    },
+  );
 
   // --- App misc -------------------------------------------------------------
   ipcMain.handle(IPC.APP_GET_HOSTNAME, () => os.hostname());
@@ -659,6 +697,10 @@ export function registerIpcHandlers(): void {
       } catch {
         // ignore
       }
+      // The warmed-origin map is a record of what the user hovered and typed:
+      // wiping browsing data must wipe it too, or "clear my data" would be a
+      // half-truth held in main-process memory.
+      if (opts.cache || opts.cookies || opts.history) getPreconnect().clear();
     },
   );
   ipcMain.handle(IPC.APP_OPEN_DEVTOOLS, (e) => {
@@ -743,9 +785,15 @@ export function wireWindowIpc(win: AppWindow): void {
   });
 
   // --- Hover status URL (native bubble) -------------------------------------
-  // While streaming, NOTHING is pushed: the hovered URL never leaves the
-  // main process, which is strictly stronger than masking it.
+  // While streaming, NOTHING is pushed to the bubble AND nothing is warmed: the
+  // hovered URL never leaves the main process at all, which is strictly stronger
+  // than masking it. (PreconnectController enforces the second half itself, so
+  // the guarantee does not depend on the order of these two lines.)
   tabs.on('update-target-url', (payload: { tabId: string; url: string }) => {
+    // Hovering a link is the strongest signal a browser gets that a navigation
+    // is coming: that is where a connection is worth warming.
+    if (payload.url) getPreconnect().hint(payload.url, 'preconnect');
+
     if (stream.getConfig().enabled) {
       win.statusView.hide({ immediate: true });
       return;

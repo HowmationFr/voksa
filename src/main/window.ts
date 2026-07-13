@@ -21,11 +21,21 @@ export type AppWindow = {
   updateChromeBounds: (bounds: ChromeBounds) => void;
   setOverlayMode: (open: boolean) => void;
   /**
-   * Load the chrome UI, then restore the given session window (or open
-   * `initialUrl` / a fresh tab). Call AFTER registerIpcHandlers: the page
-   * preload reads the stream config synchronously at document-start.
+   * Load the chrome UI, then open what the startup plan says. Call AFTER
+   * registerIpcHandlers: the page preload reads the stream config
+   * synchronously at document-start.
    */
-  bootstrap: (restore: SessionWindow | null, initialUrl?: string) => Promise<void>;
+  bootstrap: (opts: BootstrapOptions) => Promise<void>;
+};
+
+/** What a window opens with. `saved` only ever supplies geometry + the closed stack, unless the plan says 'restore'. */
+export type BootstrapOptions = {
+  saved?: SessionWindow | null;
+  open:
+    | { kind: 'restore' }
+    | { kind: 'urls'; urls: string[] }
+    | { kind: 'url'; url: string }
+    | { kind: 'newtab' };
 };
 
 /**
@@ -209,10 +219,12 @@ export async function createAppWindow(userAgent: string): Promise<AppWindow> {
     statusView.setSuspended(on);
   });
 
-  const bootstrap = async (restore: SessionWindow | null, initialUrl?: string) => {
+  const bootstrap = async ({ saved = null, open }: BootstrapOptions) => {
     // Restore window geometry before the first paint to avoid a resize flash.
-    if (restore?.windowBounds && boundsAreVisible(restore.windowBounds)) {
-      window.setBounds(restore.windowBounds);
+    // Geometry comes back in EVERY startup mode: Chrome remembers the size of
+    // your window even when it does not reopen your tabs.
+    if (saved?.windowBounds && boundsAreVisible(saved.windowBounds)) {
+      window.setBounds(saved.windowBounds);
     }
 
     const devServer = process.env.VITE_DEV_SERVER;
@@ -226,12 +238,16 @@ export async function createAppWindow(userAgent: string): Promise<AppWindow> {
       );
     }
 
-    if (restore?.maximized) window.maximize();
+    if (saved?.maximized) window.maximize();
     window.show();
 
-    // Restore tabs (lazy) or open the requested URL / a fresh one.
-    const restored = restore ? tabs.restore(restore) : false;
-    if (!restored) tabs.create(initialUrl);
+    if (open.kind === 'restore' && saved && tabs.restore(saved)) return;
+
+    // Not restoring the tabs, but the "recently closed" stack still comes back:
+    // Ctrl+Shift+T is a separate promise from session restore.
+    tabs.adoptClosedStack(saved?.closedStack);
+    if (open.kind === 'urls') tabs.openStartupUrls(open.urls);
+    else tabs.create(open.kind === 'url' ? open.url : undefined);
   };
 
   return {

@@ -54,6 +54,8 @@ export const enChrome: Record<string, string> = {
 
   // CapturePicker (Capture Handshake)
   'Partager votre écran': 'Share your screen',
+  'Aucune surface capturable n’a été trouvée sur ce système.':
+    'No capturable surface was found on this system.',
   'Choisissez ce que vous voulez partager. Une fenêtre Voksa est masquée avant la première image envoyée.':
     'Choose what to share. A Voksa window is masked before the first frame is sent.',
   'Écrans': 'Screens',

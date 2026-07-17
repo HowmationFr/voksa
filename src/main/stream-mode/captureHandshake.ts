@@ -45,6 +45,10 @@ const MASKER_READY_TIMEOUT_MS = 1500;
 /** Long enough for a human to pick; a getDisplayMedia call the user ignores
  * is cancelled rather than left pending. */
 const PICKER_TIMEOUT_MS = 60_000;
+/** Source enumeration can fail OR hang on some Linux setups (headless X11
+ * without a working capturer, Wayland without an xdg portal): bounded, so the
+ * picker still appears (empty) instead of the page waiting forever. */
+const GET_SOURCES_TIMEOUT_MS = 5_000;
 
 type PendingPick = {
   resolve: (sourceId: string | null) => void;
@@ -128,17 +132,11 @@ class CaptureHandshakeController {
       return;
     }
 
-    let sources: Electron.DesktopCapturerSource[];
-    try {
-      sources = await desktopCapturer.getSources({
-        types: ['screen', 'window'],
-        thumbnailSize: THUMB,
-        fetchWindowIcons: false,
-      });
-    } catch {
-      callback({});
-      return;
-    }
+    // Enumeration failure is NOT a silent deny: the picker still opens, empty,
+    // so the user sees why sharing has nothing to offer (headless X11, Wayland
+    // without portal) instead of the page surfacing a bare NotAllowedError.
+    // Cancelling it takes the normal clean-deny path below.
+    const sources = await this.listSources();
 
     const voksaHandles = this.voksaWindowHandles();
     const voksaDisplayIds = this.voksaDisplayIds();
@@ -175,6 +173,29 @@ class CaptureHandshakeController {
     }
 
     callback({ video: { id: sourceId, name: chosen.name } });
+  }
+
+  /**
+   * Bounded, throw-proof source enumeration. Verified failure mode on a
+   * headless Linux runner: screen_capturer_x11 cannot initialize its pixel
+   * buffer and getSources never yields a usable list; without the bound the
+   * page's getDisplayMedia would hang with no picker and no error.
+   */
+  private async listSources(): Promise<Electron.DesktopCapturerSource[]> {
+    try {
+      return await Promise.race([
+        desktopCapturer.getSources({
+          types: ['screen', 'window'],
+          thumbnailSize: THUMB,
+          fetchWindowIcons: false,
+        }),
+        new Promise<Electron.DesktopCapturerSource[]>((resolve) => {
+          setTimeout(() => resolve([]), GET_SOURCES_TIMEOUT_MS);
+        }),
+      ]);
+    } catch {
+      return [];
+    }
   }
 
   /** Show the picker in the window's chrome UI and await the selection. */

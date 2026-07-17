@@ -91,6 +91,13 @@ export function CapturePicker({
               ))}
             </Group>
           )}
+          {request.sources.length === 0 && (
+            // Enumeration failed or found nothing (headless session, Wayland
+            // without portal): say so instead of a mysteriously empty dialog.
+            <p className="text-[13px] text-fg-muted text-center py-8">
+              {t('Aucune surface capturable n’a été trouvée sur ce système.')}
+            </p>
+          )}
         </div>
         <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
           <button

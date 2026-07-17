@@ -71,6 +71,7 @@ const OBSERVED_ATTRS = [...MASKABLE_ATTRS, 'src'];
 const REDACT_ATTR = 'data-voksa-fb-redact';
 const GATE_ATTR = 'data-voksa-fb-gate';
 const STYLE_ID = '__voksa_fb_style';
+const SHROUD_STYLE_ID = '__voksa_fb_shroud';
 const REDACTABLE_INPUT = new Set(['text', 'search', 'email', 'tel', 'url', 'number', '']);
 const HEAVY_BATCH = 1500;
 
@@ -359,14 +360,45 @@ function createHandle(): FallbackHandle {
     redactedEls.clear();
   }
 
+  /**
+   * Plugin-painted document (the PDF viewer): no DOM text to sweep, so under
+   * masking the whole document is held invisible instead. Same rule as the
+   * real masker's shroud, expressed as a <style> node because this world has
+   * no webFrame.insertCSS. A hostile page could remove the node, but a
+   * rescued frame's page scripts are already inside the trust boundary this
+   * fallback documents; the observer re-adds it on the next mutation batch.
+   */
+  function setUnmaskableShroud(on: boolean): void {
+    const existing = document.getElementById(SHROUD_STYLE_ID);
+    if (!on) {
+      existing?.remove();
+      return;
+    }
+    if (existing) return;
+    const style = document.createElement('style');
+    style.id = SHROUD_STYLE_ID;
+    style.textContent = 'html{opacity:0!important}';
+    (document.head ?? document.documentElement)?.appendChild(style);
+  }
+
+  function isUnmaskableDocument(): boolean {
+    try {
+      return document.contentType === 'application/pdf';
+    } catch {
+      return false;
+    }
+  }
+
   function apply(): void {
     if (active()) {
+      setUnmaskableShroud(isUnmaskableDocument());
       startObserving();
       fullSweep();
     } else {
       stopObserving();
       restoreAll();
       ungateAll();
+      setUnmaskableShroud(false);
     }
   }
 

@@ -23,6 +23,7 @@ function tab(id: string, idleMin: number, over: Partial<TabSnapshot> = {}): TabS
     isAudible: false,
     isMuted: false,
     isInternal: false,
+    isPinned: false,
     isDiscarded: false,
     isLoading: false,
     hasCurtain: false,
@@ -116,6 +117,10 @@ describe('isProtected: the tabs that may never be freed', () => {
     expect(isProtected(tab('a', 999, { isLoading: true }), [])).toBe(true);
     expect(isProtected(tab('a', 999, { hasCurtain: true }), [])).toBe(true);
     expect(isProtected(tab('a', 999, { isDiscarded: true }), [])).toBe(true);
+  });
+
+  it('protects a pinned tab: pinning is the explicit "keep this hot" gesture', () => {
+    expect(isProtected(tab('a', 999, { isPinned: true }), [])).toBe(true);
   });
 
   it('protects an excepted host', () => {

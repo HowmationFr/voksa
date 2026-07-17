@@ -2,8 +2,10 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { app, BaseWindow, webContents, type WebContents, type WebFrameMain } from 'electron';
 import { Tab, teardownView } from './Tab';
+import { IPC } from '../../shared/ipcChannels';
 import type { ChromeBounds, TabState } from '../../shared/types';
 import type { TabSnapshot } from '../../shared/memorySaver';
+import { audioGuardVerdict } from '../../shared/audioGuard';
 import type { SessionWindow, SessionTab } from '../storage/session';
 import { computeTabBounds } from './bounds';
 import { getSettings, setSettings } from '../storage/settings';
@@ -82,6 +84,10 @@ export class TabManager extends EventEmitter {
       if (!cfg.enabled) {
         for (const t of this.tabs) this.curtain.drop(t.id);
       }
+      // DMCA Audio Guard: toggle-ON sweeps the audible background tabs,
+      // toggle-OFF lifts every guard mute (and only those; user mutes are a
+      // separate flag by construction).
+      this.applyAudioGuard();
       // Cosmetic-only updates (accent color) must not reach the guards:
       // invalidating coverage hides every subframe until the next verdict,
       // which would make the color picker blink the live page on each step.
@@ -203,7 +209,7 @@ export class TabManager extends EventEmitter {
 
   create(
     url?: string,
-    opts?: { activate?: boolean; title?: string; deferLoad?: boolean },
+    opts?: { activate?: boolean; title?: string; deferLoad?: boolean; pinned?: boolean },
   ): Tab {
     const normalized = url ? normalizeInput(url, defaultEngine()) : undefined;
     const tab = new Tab({
@@ -213,8 +219,16 @@ export class TabManager extends EventEmitter {
       preloadPath: this.preloadPath(),
       deferLoad: opts?.deferLoad,
     });
+    if (opts?.pinned) tab.pinned = true;
     this.wireTab(tab);
-    this.tabs.push(tab);
+    // A pinned tab (session restore) joins its cluster; everything else goes
+    // to the end of the strip. The invariant "pinned first" is structural.
+    if (tab.pinned) {
+      const boundary = this.tabs.findIndex((t) => !t.pinned);
+      this.tabs.splice(boundary === -1 ? this.tabs.length : boundary, 0, tab);
+    } else {
+      this.tabs.push(tab);
+    }
     // A deferLoad tab is born discarded (no webContents at all): it registers
     // with the extension runtime and gets its guard when it materializes.
     if (tab.view) this.attachTabWebContents(tab);
@@ -330,7 +344,102 @@ export class TabManager extends EventEmitter {
         // extensions runtime not available, non-fatal
       }
     }
+    // The tab that just LEFT the foreground may be audible: under Stream Mode
+    // it becomes a background audio source, exactly what the guard exists for.
+    this.applyAudioGuard();
     this.emitList();
+  }
+
+  /**
+   * DMCA Audio Guard sweep (stage 1). One idempotent pass over every tab,
+   * called from every event that can change a verdict: audible transitions,
+   * tab switches, Stream Mode toggles. The policy is pure and tested
+   * (shared/audioGuard.ts); this only applies it.
+   */
+  private applyAudioGuard(): void {
+    const streamOn = this.streamOn();
+    for (const t of this.tabs) {
+      const verdict = audioGuardVerdict(streamOn, {
+        isActive: t.id === this.activeId,
+        isAudible: t.isAudible,
+        isMuted: t.isMuted,
+        streamMuted: t.streamMuted,
+        allowed: t.streamAudioAllowed,
+      });
+      if (verdict === 'mute') t.setStreamMuted(true);
+      else if (verdict === 'unmute') t.setStreamMuted(false);
+    }
+  }
+
+  /** The chip's explicit exit: this tab may play on stream, for its lifetime. */
+  allowStreamAudio(id: string): void {
+    const tab = this.tabs.find((t) => t.id === id);
+    if (!tab) return;
+    tab.streamAudioAllowed = true;
+    tab.setStreamMuted(false);
+    this.emitList();
+  }
+
+  /**
+   * DMCA stage 2: route this tab's audio to the output device with the given
+   * LABEL (null = system default). The label is pushed to every frame (each
+   * one resolves it against its own enumeration: deviceIds are origin-hashed)
+   * and stored on the Tab so a discard/revive or navigation re-arms itself
+   * through AUDIO_ROUTE_GET_SYNC at document-start. A dormant tab just stores
+   * it: nothing to push into.
+   */
+  setAudioRoute(id: string, label: string | null): void {
+    const tab = this.tabs.find((t) => t.id === id);
+    if (!tab || tab.audioRouteLabel === label) return;
+    tab.audioRouteLabel = label;
+    this.pushAudioRoute(tab);
+    this.emitList();
+  }
+
+  private pushAudioRoute(tab: Tab): void {
+    const wc = tab.wc;
+    if (!wc) return;
+    try {
+      for (const frame of wc.mainFrame.framesInSubtree) {
+        // Guarded PER FRAME: framesInSubtree can hand back a frame whose
+        // renderer side is already gone (crashed subframe), and frame.send
+        // then throws. One dead frame must not starve the healthy ones.
+        try {
+          frame.send(IPC.AUDIO_ROUTE_APPLY, tab.audioRouteLabel);
+        } catch {
+          // disposed frame; its replacement re-asks via GET_SYNC
+        }
+      }
+    } catch {
+      try {
+        wc.send(IPC.AUDIO_ROUTE_APPLY, tab.audioRouteLabel);
+      } catch {
+        // webContents tearing down; the next document re-asks via GET_SYNC
+      }
+    }
+  }
+
+  // --- Panic (system-wide hotkey; see stream-mode/panic.ts) ------------------
+
+  /**
+   * Cover every tab with a solid curtain and hard-mute everything. The mute
+   * goes through each tab's single audio writer with the global panic flag
+   * already up, so nothing that re-applies audio state mid-panic (a revive, a
+   * guard sweep) can unmute behind the curtain.
+   */
+  panicCover(): void {
+    for (const t of this.tabs) {
+      if (t.view) void this.curtain.raise(t.id, t.view, 'solid');
+      t.applyAudioMuted();
+    }
+  }
+
+  /** Drop the panic curtains and restore each tab's own audio state. */
+  panicUncover(): void {
+    for (const t of this.tabs) {
+      this.curtain.drop(t.id);
+      t.applyAudioMuted();
+    }
   }
 
   // --- Memory Saver ---------------------------------------------------------
@@ -491,6 +600,7 @@ export class TabManager extends EventEmitter {
       isAudible: t.isAudible,
       isMuted: t.isMuted,
       isInternal: t.isInternal,
+      isPinned: t.pinned,
       isDiscarded: t.isDiscarded,
       isLoading: t.isLoading,
       hasCurtain: this.curtain.isActive(t.id),
@@ -508,13 +618,39 @@ export class TabManager extends EventEmitter {
     for (const t of this.tabs) {
       if (!next.includes(t)) next.push(t);
     }
+    // Re-impose the structural invariant rather than trusting the UI's drag
+    // order: pinned first, relative order preserved on both sides. A buggy or
+    // hostile reorder payload cannot interleave the cluster.
+    const pinned = next.filter((t) => t.pinned);
+    const rest = next.filter((t) => !t.pinned);
     this.tabs.length = 0;
-    this.tabs.push(...next);
+    this.tabs.push(...pinned, ...rest);
+    this.emitList();
+  }
+
+  /**
+   * Pin or unpin, re-homing the tab at the cluster boundary. The same
+   * insertion point serves both directions (Chrome's behaviour): pinning
+   * appends to the END of the pinned cluster, unpinning drops the tab at the
+   * START of the unpinned section.
+   */
+  setPinned(id: string, pinned: boolean): void {
+    const tab = this.tabs.find((t) => t.id === id);
+    if (!tab || tab.pinned === pinned) return;
+    tab.pinned = pinned;
+    const idx = this.tabs.indexOf(tab);
+    this.tabs.splice(idx, 1);
+    const boundary = this.tabs.findIndex((t) => !t.pinned);
+    this.tabs.splice(boundary === -1 ? this.tabs.length : boundary, 0, tab);
     this.emitList();
   }
 
   getActive(): Tab | null {
     return this.tabs.find((t) => t.id === this.activeId) ?? null;
+  }
+
+  isActiveTab(id: string): boolean {
+    return this.activeId === id;
   }
 
   getAll(): Tab[] {
@@ -609,6 +745,11 @@ export class TabManager extends EventEmitter {
     this.tabs.find((t) => t.id === id)?.stop();
   }
 
+  /** The last main-frame load error of a tab, or null (TLS interstitial). */
+  errorOf(id: string): { code: number; description: string; url: string } | null {
+    return this.tabs.find((t) => t.id === id)?.error ?? null;
+  }
+
   duplicate(id: string): void {
     const tab = this.tabs.find((t) => t.id === id);
     if (!tab) return;
@@ -621,14 +762,18 @@ export class TabManager extends EventEmitter {
     tab.setMuted(muted ?? !tab.isMuted);
   }
 
+  // Bulk closes spare pinned tabs (Chrome does the same): pinning is a
+  // "protect me" gesture and a sweep gesture must not override it.
   closeOthers(id: string): void {
-    for (const t of [...this.tabs]) if (t.id !== id) this.close(t.id);
+    for (const t of [...this.tabs]) if (t.id !== id && !t.pinned) this.close(t.id);
   }
 
   closeRight(id: string): void {
     const idx = this.tabs.findIndex((t) => t.id === id);
     if (idx === -1) return;
-    for (const t of this.tabs.slice(idx + 1)) this.close(t.id);
+    for (const t of this.tabs.slice(idx + 1)) {
+      if (!t.pinned) this.close(t.id);
+    }
   }
 
   // --- Zoom -----------------------------------------------------------------
@@ -684,7 +829,9 @@ export class TabManager extends EventEmitter {
     return {
       windowBounds: bounds,
       maximized: this.window.isMaximized(),
-      tabs: this.tabs.map((t) => ({ url: t.url, title: t.title })),
+      // `pinned` only when true: session files stay byte-identical for
+      // profiles that never pin.
+      tabs: this.tabs.map((t) => ({ url: t.url, title: t.title, pinned: t.pinned || undefined })),
       activeIndex,
       closedStack: this.closedStack.slice(-MAX_CLOSED),
     };
@@ -695,10 +842,18 @@ export class TabManager extends EventEmitter {
     if (restorable.length === 0) return false;
     this.closedStack = Array.isArray(data.closedStack) ? data.closedStack.slice(-MAX_CLOSED) : [];
     const activeIndex = Math.min(Math.max(0, data.activeIndex), restorable.length - 1);
-    restorable.forEach((t, i) => {
-      this.create(t.url, { activate: false, title: t.title, deferLoad: i !== activeIndex });
-    });
-    const activeTab = this.tabs[activeIndex];
+    // Track created tabs by FILE index: create() re-homes a pinned tab into
+    // its cluster, so this.tabs order no longer matches file order and
+    // this.tabs[activeIndex] would activate the wrong tab.
+    const created = restorable.map((t, i) =>
+      this.create(t.url, {
+        activate: false,
+        title: t.title,
+        deferLoad: i !== activeIndex,
+        pinned: t.pinned === true,
+      }),
+    );
+    const activeTab = created[activeIndex];
     if (activeTab) this.setActive(activeTab.id);
     return true;
   }
@@ -780,7 +935,13 @@ export class TabManager extends EventEmitter {
 
   /** Tab-object listeners: they survive a discard (the Tab object lives on). */
   private wireTab(tab: Tab): void {
-    tab.on('state-changed', () => this.emitList());
+    tab.on('state-changed', () => {
+      // Audible transitions arrive as state changes: re-run the guard before
+      // repainting. Idempotent, so the state-changed a guard mute itself
+      // emits converges on the second pass instead of looping.
+      this.applyAudioGuard();
+      this.emitList();
+    });
     if (tab.view) this.rewireTab(tab);
   }
 
@@ -838,6 +999,9 @@ export class TabManager extends EventEmitter {
               sandbox: true,
               nodeIntegration: false,
               nodeIntegrationInSubFrames: true,
+              // Same as Tab.createView: a popup landing on a PDF should render
+              // it, not download it.
+              plugins: true,
             },
             autoHideMenuBar: true,
           },

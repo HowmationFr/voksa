@@ -74,7 +74,10 @@ export function buildApplicationMenu(getApp: () => AppWindow | null): Menu {
           accelerator: 'CmdOrCtrl+W',
           click: () => {
             const a = active();
-            if (a) tabs()?.close(a.id);
+            // Ctrl+W is a no-op on a pinned tab, like Chrome: pinning exists
+            // precisely to survive the reflexive close. Unpin or use the tab
+            // context menu to actually close it.
+            if (a && !a.pinned) tabs()?.close(a.id);
           },
         },
         { type: 'separator' },

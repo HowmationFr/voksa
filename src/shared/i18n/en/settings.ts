@@ -35,6 +35,34 @@ export const enSettings: Record<string, string> = {
     'Open a specific page or set of pages',
   'Pages à ouvrir': 'Pages to open',
   'Utiliser les pages actuelles': 'Use current pages',
+  'Navigateur par défaut': 'Default browser',
+  'Importer': 'Import',
+  'Importer les favoris et l’historique': 'Import bookmarks and history',
+  'Recherche des navigateurs installés…': 'Looking for installed browsers…',
+  'Aucun profil Chrome ou Firefox détecté sur cet ordinateur.':
+    'No Chrome or Firefox profile detected on this computer.',
+  'Favoris': 'Bookmarks',
+  'Historique': 'History',
+  'Les favoris arrivent dans un dossier dédié ; les doublons sont ignorés. Les mots de passe ne sont jamais importés.':
+    'Bookmarks land in a dedicated folder; duplicates are skipped. Passwords are never imported.',
+  'Import en cours…': 'Importing…',
+  '{n} favoris importés ({skipped} déjà présents)': '{n} bookmarks imported ({skipped} already present)',
+  '{n} pages d’historique importées': '{n} history pages imported',
+  'La base est verrouillée : fermez l’autre navigateur puis réessayez.':
+    'The database is locked: close the other browser and try again.',
+  'Rien à importer : cochez au moins un type de données.':
+    'Nothing to import: tick at least one data type.',
+  'L’import a échoué : le profil est illisible ou a disparu.':
+    'The import failed: the profile is unreadable or gone.',
+  'Voksa est votre navigateur par défaut.': 'Voksa is your default browser.',
+  'Voksa n’est pas votre navigateur par défaut.': 'Voksa is not your default browser.',
+  // 'Définir par défaut' is already keyed in en/pages.ts (search engines page).
+  'Indisponible en développement : seul le build installé peut être choisi par le système.':
+    'Unavailable in development: only the installed build can be picked by the system.',
+  'Windows va ouvrir les Réglages : choisissez Voksa dans « Navigateur web ».':
+    'Windows will open Settings: pick Voksa under "Web browser".',
+  'Les liens ouverts par les autres applications s’ouvriront dans Voksa.':
+    'Links opened by other applications will open in Voksa.',
   'https://exemple.com': 'https://example.com',
   'Liste pleine ({n} pages).': 'List full ({n} pages).',
   'Aucune page : Voksa ouvrira un nouvel onglet.':

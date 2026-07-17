@@ -1,4 +1,4 @@
-import { ipcMain, Menu, nativeTheme, Notification, session, shell, webContents } from 'electron';
+import { app, ipcMain, Menu, nativeTheme, Notification, session, shell, webContents } from 'electron';
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 import os from 'node:os';
 import { buildApplicationMenu } from '../menu';
@@ -28,6 +28,15 @@ import {
 } from '../windows';
 import { getStreamMode } from '../stream-mode/StreamModeController';
 import { installPermissionHandlers } from '../stream-mode/permissions';
+import {
+  allowPendingCertException,
+  clearCertExceptions,
+  installNetGuards,
+} from '../netGuards';
+import { detectSources, runImport, type ImportSelection } from '../import/importer';
+import { getPanic } from '../stream-mode/panic';
+import { getCaptureHandshake } from '../stream-mode/captureHandshake';
+import { runPreflight } from '../../shared/preflight';
 import { DownloadManager } from '../downloads/DownloadManager';
 import { UpdateController } from '../updates';
 import {
@@ -174,6 +183,17 @@ export function registerIpcHandlers(): void {
   installPermissionHandlers(session.defaultSession, {
     getStreamConfig: () => stream.getConfig(),
     isChromeContents: (wc) => isChromeViewContents(wc),
+    // DMCA stage 2: a routed tab needs device-label exposure + setSinkId.
+    // Resolved through the live-window registry at CHECK time (never captured):
+    // the route can be set or cleared at any moment.
+    isAudioRouted: (wc) => {
+      if (!wc) return false;
+      for (const win of allWindows()) {
+        const tab = win.tabs.findByWebContents(wc);
+        if (tab) return tab.audioRouteLabel != null;
+      }
+      return false;
+    },
     getRemembered: (origin, permission) =>
       getSettings().sitePermissions?.[origin]?.[permission],
     remember: (origin, permission, decision) => {
@@ -207,6 +227,10 @@ export function registerIpcHandlers(): void {
       }),
   });
 
+  // --- Network guards (HTTP auth dialog + TLS interstitial) ----------------
+  // App-wide events, registered once like the permission handlers above.
+  installNetGuards((win, channel, payload) => sendToChrome(win, channel, payload));
+
   // --- Tabs -----------------------------------------------------------------
   ipcMain.handle(IPC.TAB_CREATE, (e, url?: string) => {
     const win = senderWindow(e);
@@ -230,6 +254,25 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.TAB_BACK, (e, id: string) => senderWindow(e)?.tabs.back(id));
   ipcMain.handle(IPC.TAB_FORWARD, (e, id: string) => senderWindow(e)?.tabs.forward(id));
   ipcMain.handle(IPC.TAB_RELOAD, (e, id: string) => senderWindow(e)?.tabs.reload(id));
+  // TLS interstitial "continue anyway": promote the pending certificate
+  // exception for the host the user actually SAW in the interstitial (the
+  // failed URL's host, never a parameter from the renderer), then retry the
+  // navigation. Returns false when nothing was pending: the caller must not
+  // pretend an exception was granted.
+  ipcMain.handle(IPC.TAB_TLS_PROCEED, (e, id: string) => {
+    const win = senderWindow(e);
+    const failed = win?.tabs.errorOf(id)?.url;
+    if (!win || !failed) return false;
+    let host = '';
+    try {
+      host = new URL(failed).host;
+    } catch {
+      return false;
+    }
+    if (!host || !allowPendingCertException(host)) return false;
+    void win.tabs.reload(id);
+    return true;
+  });
   ipcMain.handle(IPC.TAB_STOP, (e, id: string) => senderWindow(e)?.tabs.stop(id));
   ipcMain.handle(IPC.TAB_LIST, (e) => senderWindow(e)?.tabs.listState() ?? []);
   ipcMain.handle(IPC.TAB_REOPEN_CLOSED, (e) => senderWindow(e)?.tabs.reopenClosed());
@@ -238,6 +281,61 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle(IPC.TAB_DUPLICATE, (e, id: string) => senderWindow(e)?.tabs.duplicate(id));
   ipcMain.handle(IPC.TAB_DISCARD, (e, id: string) => senderWindow(e)?.tabs.discard(id) ?? false);
+  ipcMain.handle(IPC.TAB_SET_PINNED, (e, id: string, pinned: boolean) =>
+    senderWindow(e)?.tabs.setPinned(id, !!pinned),
+  );
+  ipcMain.handle(IPC.TAB_ALLOW_STREAM_AUDIO, (e, id: string) =>
+    senderWindow(e)?.tabs.allowStreamAudio(id),
+  );
+  // DMCA stage 2: route a tab's audio to a chosen output device (by LABEL,
+  // null = system default). See shared/audioRouting.ts for why labels.
+  ipcMain.handle(IPC.AUDIO_ROUTE_SET, (e, id: string, label: string | null) =>
+    senderWindow(e)?.tabs.setAudioRoute(
+      String(id),
+      typeof label === 'string' && label.length > 0 ? label : null,
+    ),
+  );
+  // Synchronous route read for the page preload's document-start re-arm.
+  // returnValue MUST always be set, whatever happens: a sendSync with no
+  // returnValue hangs the calling renderer.
+  ipcMain.on(IPC.AUDIO_ROUTE_GET_SYNC, (event) => {
+    let label: string | null = null;
+    try {
+      const win = windowFromPageContents(event.sender);
+      label = win?.tabs.findByWebContents(event.sender)?.audioRouteLabel ?? null;
+    } catch {
+      label = null;
+    }
+    event.returnValue = label;
+  });
+  // Main-frame resolve verdict. matched:false = the chosen device no longer
+  // exists (labels present, label absent): clear the route so the UI stops
+  // claiming a routing that is not applied (fail-visible, never silent). The
+  // verdict carries the LABEL it judged: a stale in-flight verdict about a
+  // previous label must not clear the route the user just changed to.
+  ipcMain.on(
+    IPC.AUDIO_ROUTE_STATUS,
+    (event, payload: { matched?: boolean; label?: string } | undefined) => {
+      try {
+        if (event.senderFrame && event.senderFrame.parent !== null) return; // subframe
+      } catch {
+        return; // frame already disposed
+      }
+      const win = windowFromPageContents(event.sender);
+      const tab = win?.tabs.findByWebContents(event.sender);
+      if (!win || !tab) return;
+      if (
+        payload?.matched === false &&
+        tab.audioRouteLabel != null &&
+        payload.label === tab.audioRouteLabel
+      ) {
+        console.warn(
+          `[audio-route] output device "${tab.audioRouteLabel}" not resolvable in this tab; falling back to system default`,
+        );
+        win.tabs.setAudioRoute(tab.id, null);
+      }
+    },
+  );
   ipcMain.handle(IPC.TAB_CLOSE_OTHERS, (e, id: string) => senderWindow(e)?.tabs.closeOthers(id));
   ipcMain.handle(IPC.TAB_CLOSE_RIGHT, (e, id: string) => senderWindow(e)?.tabs.closeRight(id));
 
@@ -352,6 +450,16 @@ export function registerIpcHandlers(): void {
     });
   };
 
+  // --- Browser-data import ---------------------------------------------------
+  ipcMain.handle(IPC.IMPORT_SOURCES, () => detectSources());
+  ipcMain.handle(IPC.IMPORT_RUN, (_e, selection: ImportSelection) => {
+    const result = runImport(selection);
+    // The import writes straight into the stores; every window must repaint
+    // its bookmark surfaces (the history page queries on mount).
+    if (result.ok && result.bookmarksImported > 0) broadcastBookmarks();
+    return result;
+  });
+
   ipcMain.handle(
     IPC.BOOKMARKS_ADD,
     (
@@ -427,11 +535,34 @@ export function registerIpcHandlers(): void {
     if (next.language !== before) {
       Menu.setApplicationMenu(buildApplicationMenu(() => focusedWindow()));
     }
+    // The panic hotkey follows its settings live (rebind, enable/disable).
+    getPanic().syncRegistration();
     broadcastToChromes(IPC.SETTINGS_CHANGED, next);
     return next;
   });
 
   // --- Stream mode ----------------------------------------------------------
+  // Panic controller: subscribes to stream toggles for its lazy hotkey
+  // registration. A singleton like the rest of this block (CLAUDE.md 4.9).
+  getPanic().init();
+  ipcMain.handle(IPC.STREAM_PANIC, () => getPanic().toggle());
+
+  // Capture Handshake: own the display-media picker so a shared Voksa surface
+  // is masked before its first frame. Installed once (defaultSession global).
+  getCaptureHandshake().install();
+  ipcMain.on(IPC.CAPTURE_PICKER_PICK, (_e, payload: { pickId: string; sourceId: string | null }) => {
+    getCaptureHandshake().resolvePick(payload?.pickId, payload?.sourceId ?? null);
+  });
+  // Debug-only: exercise the handshake without Chromium's getDisplayMedia
+  // (which does not reach setDisplayMediaRequestHandler under CDP). Inert in
+  // production: returns null unless the debug CDP port is set (smoke/debug).
+  ipcMain.handle(IPC.CAPTURE_SIMULATE, async (e) => {
+    if (!process.env.VOKSA_DEBUG_PORT) return null;
+    const win = senderWindow(e);
+    const requester = win?.tabs.getActive()?.view?.webContents ?? null;
+    return getCaptureHandshake().simulateRequest(requester);
+  });
+
   ipcMain.handle(IPC.STREAM_GET_CONFIG, () => stream.getConfig());
   // Synchronous config read for the page preload's document-start shroud
   // decision (must resolve before the first paint, no async round-trip).
@@ -443,6 +574,31 @@ export function registerIpcHandlers(): void {
     stream.update(patch),
   );
   ipcMain.handle(IPC.STREAM_TOGGLE, () => stream.toggle());
+
+  // Go-Live Preflight: scan the SENDER window's tabs for viewer-facing risks,
+  // using the exact mask config the page masker uses (a finding here is what
+  // Stream Mode would mask). The pure scanner lives in shared/preflight.ts.
+  ipcMain.handle(IPC.PREFLIGHT_RUN, (e) => {
+    const win = senderWindow(e);
+    if (!win) return { findings: [], scanned: 0 };
+    const cfg = stream.getConfig();
+    const flags = {
+      maskIPv4: cfg.maskIPv4,
+      maskIPv6: cfg.maskIPv6,
+      maskEmails: cfg.maskEmails,
+      maskPhones: cfg.maskPhones,
+      maskInternalHostnames: cfg.maskInternalHostnames,
+    };
+    const tabs = win.tabs.getAll().map((t) => ({
+      id: t.id,
+      title: t.title,
+      url: t.url,
+      isAudible: t.isAudible,
+      isActive: win.tabs.isActiveTab(t.id),
+      isInternal: t.isInternal,
+    }));
+    return runPreflight(tabs, flags, os.hostname(), cfg.customMasks);
+  });
 
   // Doc-nonce protocol: a new document started masking / finished its initial
   // sweep. Pair/drop the tab's curtain by matching nonce (ignores stale readies
@@ -456,7 +612,12 @@ export function registerIpcHandlers(): void {
   ipcMain.on(IPC.STREAM_READY, (event, payload: { nonce?: string } | undefined) => {
     const win = windowFromPageContents(event.sender);
     const host = win?.tabs.findByWebContents(event.sender);
-    if (win && host) win.curtain.onReady(host.id, payload?.nonce ?? null);
+    if (win && host) {
+      win.curtain.onReady(host.id, payload?.nonce ?? null);
+      // Capture Handshake waits on this: a tab that just finished masking
+      // under a freshly-armed stream is safe to hand to a screen share.
+      getCaptureHandshake().notifyMaskerReady(win.window.id);
+    }
   });
 
   // Frame guard (electron/electron#34727): a frame that got our preload
@@ -715,8 +876,39 @@ export function registerIpcHandlers(): void {
       // the gate bought nothing -- dropping a small in-memory map costs nothing
       // and there is no box under which keeping it would be the right answer.
       getPreconnect().clear();
+      // Same reasoning for session TLS exceptions: hosts the user clicked
+      // through are a record of where they went, and a stale exception is a
+      // standing risk. Unconditional.
+      clearCertExceptions();
     },
   );
+  // --- Default browser -------------------------------------------------------
+  // isDefaultProtocolClient asks the OS who owns http/https right now. Only
+  // meaningful packaged: in dev the registered binary would be electron.exe.
+  const defaultBrowserState = () => ({
+    packaged: app.isPackaged,
+    isDefault:
+      app.isPackaged &&
+      app.isDefaultProtocolClient('http') &&
+      app.isDefaultProtocolClient('https'),
+  });
+  ipcMain.handle(IPC.APP_DEFAULT_BROWSER_STATE, () => defaultBrowserState());
+  ipcMain.handle(IPC.APP_SET_DEFAULT_BROWSER, async () => {
+    if (!app.isPackaged) return defaultBrowserState();
+    if (process.platform === 'win32') {
+      // Windows 10+ forbids claiming a default programmatically (association
+      // hashes): the supported flow, the one Chrome and Firefox use, is to be
+      // REGISTERED (installer.nsh) and send the user to Settings to pick.
+      await shell.openExternal('ms-settings:defaultapps');
+    } else {
+      // macOS prompts the user for confirmation; Linux goes through
+      // xdg-settings. Both are the sanctioned path.
+      app.setAsDefaultProtocolClient('http');
+      app.setAsDefaultProtocolClient('https');
+    }
+    return defaultBrowserState();
+  });
+
   ipcMain.handle(IPC.APP_OPEN_DEVTOOLS, (e) => {
     // BrowserWindow.getFocusedWindow() is always null for a BaseWindow, so
     // target the active tab of the SENDER's window directly (falls back to

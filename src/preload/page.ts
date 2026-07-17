@@ -3,6 +3,7 @@ import { IPC } from '../shared/ipcChannels';
 import type { StreamModeConfig } from '../shared/streamConfig';
 import { installStreamMasker, type FramesStatus, type MaskerHost } from '../injected/streamMask';
 import { installHoverMasker } from '../injected/hoverMask';
+import { installAudioRouter } from '../injected/audioRoute';
 
 /**
  * Page preload : runs in every frame's isolated world (nodeIntegrationInSub-
@@ -154,6 +155,46 @@ const host: MaskerHost = {
 
 installStreamMasker(host);
 installHoverMasker(host);
+
+// -- 2b. Per-tab audio output routing (DMCA stage 2) --------------------------
+// Every frame runs its own router: deviceIds are hashed per origin, so each
+// frame must resolve the stored device LABEL against its own enumeration
+// (see shared/audioRouting.ts). Only the MAIN frame reports the verdict:
+// main clears the route on matched:false (fail-visible).
+const audioRouter = installAudioRouter({
+  execMainWorld: (code) => webFrame.executeJavaScript(code, false),
+  reportStatus: (matched, label) => {
+    if (!IS_MAIN_FRAME) return;
+    try {
+      // The judged label rides along: main must ignore a stale verdict about
+      // a label that is no longer the tab's route (the user may have picked
+      // another device while this one was in flight).
+      ipcRenderer.send(IPC.AUDIO_ROUTE_STATUS, { matched, label });
+    } catch {
+      // ignore
+    }
+  },
+});
+
+// Synchronous read at document-start: a ROUTED tab must re-arm its main-world
+// patch before any page script can create an AudioContext (reload, revive,
+// navigation). Not routed (the overwhelmingly common case) = null = zero
+// main-world footprint and no further work.
+let initialAudioRoute: string | null = null;
+try {
+  const res = ipcRenderer.sendSync(IPC.AUDIO_ROUTE_GET_SYNC) as string | null | undefined;
+  initialAudioRoute = typeof res === 'string' && res.length > 0 ? res : null;
+} catch {
+  initialAudioRoute = null;
+}
+if (initialAudioRoute != null) {
+  audioRouter.preinstall();
+  void audioRouter.apply(initialAudioRoute);
+}
+
+ipcRenderer.on(IPC.AUDIO_ROUTE_APPLY, (_e, label: unknown) => {
+  void audioRouter.apply(typeof label === 'string' && label.length > 0 ? label : null);
+});
 
 // -- 3. Chrome Web Store branding fixup --------------------------------------
 if (window.location.hostname === 'chromewebstore.google.com') {

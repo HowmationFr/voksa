@@ -32,6 +32,9 @@ const DEFAULTS: AppSettings = {
   startupMode: DEFAULT_STARTUP_MODE,
   startupUrls: [],
   preconnect: true,
+  panicKeyEnabled: true,
+  panicKey: 'CommandOrControl+Alt+P',
+  soundCues: { streamToggle: true, downloadDone: false, updateReady: false },
 };
 
 const VALID_THEMES: AppSettings['theme'][] = ['light', 'dark', 'system'];
@@ -87,6 +90,28 @@ function sanitize(parsed: Partial<AppSettings>): AppSettings {
   if (!isStartupMode(merged.startupMode)) merged.startupMode = DEFAULT_STARTUP_MODE;
   merged.startupUrls = sanitizeStartupUrls(merged.startupUrls);
   if (typeof merged.preconnect !== 'boolean') merged.preconnect = DEFAULTS.preconnect;
+  if (typeof merged.panicKeyEnabled !== 'boolean') merged.panicKeyEnabled = DEFAULTS.panicKeyEnabled;
+  // Accelerator sanity: a non-empty modifier+key chord, bounded. The REAL
+  // validation is globalShortcut.register at arm time (panic.ts), which
+  // degrades to unregistered on an OS-level collision; this only rejects
+  // strings that could never be an accelerator.
+  if (
+    typeof merged.panicKey !== 'string' ||
+    !merged.panicKey.trim() ||
+    merged.panicKey.length > 64 ||
+    !merged.panicKey.includes('+')
+  ) {
+    merged.panicKey = DEFAULTS.panicKey;
+  }
+  const cues = merged.soundCues as Partial<AppSettings['soundCues']> | undefined;
+  merged.soundCues = {
+    streamToggle:
+      typeof cues?.streamToggle === 'boolean' ? cues.streamToggle : DEFAULTS.soundCues.streamToggle,
+    downloadDone:
+      typeof cues?.downloadDone === 'boolean' ? cues.downloadDone : DEFAULTS.soundCues.downloadDone,
+    updateReady:
+      typeof cues?.updateReady === 'boolean' ? cues.updateReady : DEFAULTS.soundCues.updateReady,
+  };
   if (typeof merged.homepage !== 'string' || !merged.homepage.trim()) {
     merged.homepage = DEFAULTS.homepage;
   } else if (/^hbb:\/\//i.test(merged.homepage)) {

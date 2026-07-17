@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { app } from 'electron';
 
-export type SessionTab = { url: string; title: string };
+/** `pinned` is optional on disk: files written before pinning simply omit it. */
+export type SessionTab = { url: string; title: string; pinned?: boolean };
 
 /** One browser window: its geometry, its tabs, its own reopen-closed stack. */
 export type SessionWindow = {

@@ -45,6 +45,16 @@ One shortcut (`Ctrl+Shift+S`) or one click on the shield, and:
 - **Hardware stays private**: camera, microphone, location and screen-capture requests are silently denied, and WebRTC (the classic IP leak) is blocked.
 - **No flashes.** Pages are revealed only after masking has run, on every navigation, reload and tab switch.
 
+## 🎙️ Built for going live
+
+Stream Mode is the shield; these are the tools around it:
+
+- **Panic button.** One system-wide shortcut, working even while OBS or your game has the focus: every Voksa window is instantly curtained and all sound is cut. Press again to come back; the protection stays armed.
+- **Screen-share handshake.** When Meet, Zoom or Discord (web) asks to share your screen, Voksa shows its own picker, and choosing a surface that contains Voksa arms Stream Mode **before the first frame is delivered**. The other side never sees a pre-masking frame.
+- **Go-Live preflight.** One click before the stream lists exactly what a viewer could catch: an email in a tab title, a sensitive URL, a background tab playing sound. Each finding comes with a one-click fix.
+- **Per-tab audio.** Under Stream Mode, a background tab that starts playing sound is muted automatically (one click on the tab's chip allows it back). And any tab's sound can be routed to a different output device: right-click the tab, pick your headset, and OBS, which captures the default output, no longer hears your music tab. No virtual audio cable needed.
+- **Sound signals.** Short audio cues confirm Stream Mode arming and disarming, so you hear the mask go up without looking away from OBS.
+
 ## 🎯 Why not just a masking extension?
 
 Chrome extensions that blur or hide sensitive content do exist. The problem: an extension runs **inside a page the browser has already drawn**. It reacts after the fact, so on every page load, reload, new tab, iframe or fast page change there is a window of a few frames where the raw content is painted before the extension catches up.
@@ -66,11 +76,13 @@ Voksa works the other way around: because it IS the browser, pages are kept invi
 
 - Sign in to **Google, Gmail and YouTube** normally.
 - Install extensions straight from the **Chrome Web Store**: uBlock Origin, Bitwarden and friends just work, cascading right-click menus included.
-- **Multiple windows**, nested **bookmark folders** with drag and drop, full **history** and search.
+- **Multiple windows**, **pinned tabs**, nested **bookmark folders** with drag and drop, full **history** and search.
 - **Memory Saver**: inactive tabs give their memory back to your machine and reload where you left them, scroll position and half-filled forms included. Three levels, plus a list of sites to always keep alive.
 - **Search engines**: seven built in (Google, Bing, DuckDuckGo, Brave, Qwant, Ecosia, Startpage), plus your own, with `%s` standing in for the query. Every engine gets a **keyword**: type `duckduckgo.com`, hit Space, and search it without changing your default.
 - **On startup**, open the New Tab page, continue where you left off, or open a set of pages you choose.
-- **Downloads**, find in page, per-site **permission controls**, persistent zoom, print with live preview, session restore.
+- **Import from Chrome or Firefox**: bookmarks and history in one click. Never passwords: decrypting another browser's vault is not something a healthy program does.
+- **Default browser**: Voksa registers with the OS so links from other apps open in it.
+- **Downloads**, a built-in **PDF viewer** (kept invisible while Stream Mode is on: PDF content cannot be masked, so it is never shown to viewers), find in page, per-site **permission controls**, persistent zoom, print with live preview, session restore.
 - Full **dark mode** (light, dark, or follow the system).
 - **French and English**, detected from your system, switchable in Settings.
 - **Automatic updates**: Voksa downloads new versions in the background and installs them on the next restart.

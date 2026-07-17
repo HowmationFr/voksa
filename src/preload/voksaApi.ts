@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { IPC, type IpcChannel } from '../shared/ipcChannels';
 import type {
   AppSettings,
+  AuthRequest,
   Bookmark,
   BookmarkFolder,
   BookmarksChangedPayload,
@@ -43,10 +44,28 @@ export function buildVoksaApi() {
       back: (id: string) => ipcRenderer.invoke(IPC.TAB_BACK, id),
       forward: (id: string) => ipcRenderer.invoke(IPC.TAB_FORWARD, id),
       reload: (id: string) => ipcRenderer.invoke(IPC.TAB_RELOAD, id),
+      /**
+       * TLS interstitial "continue anyway": trust the exact certificate the
+       * user saw, for this app run only, then retry. Resolves false when no
+       * exception was pending (nothing happens).
+       */
+      tlsProceed: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC.TAB_TLS_PROCEED, id),
       stop: (id: string) => ipcRenderer.invoke(IPC.TAB_STOP, id),
       list: (): Promise<TabState[]> => ipcRenderer.invoke(IPC.TAB_LIST),
       reopenClosed: () => ipcRenderer.invoke(IPC.TAB_REOPEN_CLOSED),
       mute: (id: string, muted?: boolean) => ipcRenderer.invoke(IPC.TAB_MUTE, id, muted),
+      /** Pin/unpin: the tab is re-homed at the pinned-cluster boundary by main. */
+      setPinned: (id: string, pinned: boolean) =>
+        ipcRenderer.invoke(IPC.TAB_SET_PINNED, id, pinned),
+      /** DMCA Audio Guard chip: this tab may play on stream, for its lifetime. */
+      allowStreamAudio: (id: string) => ipcRenderer.invoke(IPC.TAB_ALLOW_STREAM_AUDIO, id),
+      /**
+       * DMCA stage 2: route this tab's audio to the output device with the
+       * given LABEL (null = back to the system default). Labels, not ids:
+       * deviceIds are origin-hashed (shared/audioRouting.ts).
+       */
+      setAudioRoute: (id: string, label: string | null) =>
+        ipcRenderer.invoke(IPC.AUDIO_ROUTE_SET, id, label),
       duplicate: (id: string) => ipcRenderer.invoke(IPC.TAB_DUPLICATE, id),
       /** Free this tab's renderer. Returns false when the tab is protected. */
       discard: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC.TAB_DISCARD, id),
@@ -134,8 +153,58 @@ export function buildVoksaApi() {
       update: (patch: Partial<StreamModeConfig>): Promise<StreamModeConfig> =>
         ipcRenderer.invoke(IPC.STREAM_UPDATE_CONFIG, patch),
       toggle: (): Promise<StreamModeConfig> => ipcRenderer.invoke(IPC.STREAM_TOGGLE),
+      /**
+       * Panic: curtain every window + mute everything + arm the stream;
+       * second call restores (the stream stays armed on purpose). Same action
+       * the system-wide hotkey triggers.
+       */
+      panic: (): Promise<{ active: boolean }> => ipcRenderer.invoke(IPC.STREAM_PANIC),
       onChanged: (handler: (config: StreamModeConfig) => void): Unsubscribe =>
         on<StreamModeConfig>(IPC.STREAM_CONFIG_CHANGED, handler),
+    },
+    capture: {
+      /** Main pushes the screen-share picker (our own, not Chromium's). */
+      onPickerShow: (
+        handler: (payload: {
+          pickId: string;
+          sources: Array<{
+            id: string;
+            name: string;
+            kind: 'screen' | 'window';
+            thumbnail: string | null;
+            containsVoksa: boolean;
+          }>;
+        }) => void,
+      ): Unsubscribe =>
+        on<{
+          pickId: string;
+          sources: Array<{
+            id: string;
+            name: string;
+            kind: 'screen' | 'window';
+            thumbnail: string | null;
+            containsVoksa: boolean;
+          }>;
+        }>(IPC.CAPTURE_PICKER_SHOW, handler),
+      /** Answer the picker: a chosen source id, or null to cancel the share. */
+      pick: (pickId: string, sourceId: string | null) =>
+        ipcRenderer.send(IPC.CAPTURE_PICKER_PICK, { pickId, sourceId }),
+      /**
+       * Debug/test only: drive the handshake without Chromium's getDisplayMedia
+       * (which does not route to our handler under CDP). Resolves with the
+       * delivered source id, or null. No-op (null) in production builds.
+       */
+      simulate: (): Promise<string | null> => ipcRenderer.invoke(IPC.CAPTURE_SIMULATE),
+    },
+    preflight: {
+      /** Scan this window's tabs for what a viewer could catch before going live. */
+      run: (): Promise<{
+        scanned: number;
+        findings: Array<
+          | { kind: 'sensitive-text'; tabId: string; label: string; where: 'title' | 'url' | 'both' }
+          | { kind: 'audible'; tabId: string; label: string }
+        >;
+      }> => ipcRenderer.invoke(IPC.PREFLIGHT_RUN),
     },
     suggestions: {
       query: (q: string, engine?: string): Promise<Suggestion[]> =>
@@ -176,6 +245,16 @@ export function buildVoksaApi() {
       openDevTools: () => ipcRenderer.invoke(IPC.APP_OPEN_DEVTOOLS),
       openExternal: (url: string) => ipcRenderer.invoke(IPC.APP_OPEN_EXTERNAL, url),
       getHostname: (): Promise<string> => ipcRenderer.invoke(IPC.APP_GET_HOSTNAME),
+      /** Is Voksa the OS handler for http/https? Always false in dev builds. */
+      defaultBrowserState: (): Promise<{ packaged: boolean; isDefault: boolean }> =>
+        ipcRenderer.invoke(IPC.APP_DEFAULT_BROWSER_STATE),
+      /**
+       * Ask to become the default browser. macOS/Linux register directly (the
+       * OS may confirm); Windows opens Settings > Default apps, where the
+       * user picks Voksa (no programmatic claim exists there).
+       */
+      setDefaultBrowser: (): Promise<{ packaged: boolean; isDefault: boolean }> =>
+        ipcRenderer.invoke(IPC.APP_SET_DEFAULT_BROWSER),
       setTheme: (theme: 'light' | 'dark') => ipcRenderer.invoke(IPC.APP_SET_THEME, theme),
       clearBrowsingData: (opts: ClearBrowsingDataOptions) =>
         ipcRenderer.invoke(IPC.APP_CLEAR_BROWSING_DATA, opts),
@@ -213,6 +292,43 @@ export function buildVoksaApi() {
         on<{ id: string; origin: string; permission: string }>(IPC.PERMISSION_REQUEST, handler),
       respond: (id: string, allow: boolean, remember: boolean) =>
         ipcRenderer.send(IPC.PERMISSION_RESPOND, { id, allow, remember }),
+    },
+    importData: {
+      /** Detected Chrome/Firefox profiles with importable data. */
+      sources: (): Promise<
+        Array<{
+          id: string;
+          browser: 'chrome' | 'firefox';
+          profileName: string;
+          profileDir: string;
+          hasBookmarks: boolean;
+          hasHistory: boolean;
+        }>
+      > => ipcRenderer.invoke(IPC.IMPORT_SOURCES),
+      /** Run an import. Bookmarks land in a dedicated folder; passwords never move. */
+      run: (selection: {
+        sourceId: string;
+        bookmarks: boolean;
+        history: boolean;
+      }): Promise<
+        | {
+            ok: true;
+            bookmarksImported: number;
+            bookmarksSkipped: number;
+            historyImported: number;
+            folderName: string | null;
+          }
+        | { ok: false; error: 'source-gone' | 'locked' | 'nothing-selected' | 'read-failed' }
+      > => ipcRenderer.invoke(IPC.IMPORT_RUN, selection),
+    },
+    auth: {
+      /** HTTP authentication challenges (Basic/Digest/proxy) for this window. */
+      onRequest: (handler: (req: AuthRequest) => void): Unsubscribe =>
+        on<AuthRequest>(IPC.AUTH_REQUEST, handler),
+      /** Credentials go straight to Chromium's auth callback; never persisted. */
+      respond: (id: string, username: string, password: string) =>
+        ipcRenderer.send(IPC.AUTH_RESPOND, { id, username, password }),
+      cancel: (id: string) => ipcRenderer.send(IPC.AUTH_RESPOND, { id, cancel: true }),
     },
     menu: {
       onCommand: (handler: (cmd: string) => void): Unsubscribe =>

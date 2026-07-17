@@ -66,4 +66,12 @@ export const enDialogs: Record<string, string> = {
     'The chosen time range applies to history and downloads. Cookies, cache, site data and site permissions have no timestamps: they will be cleared entirely.',
   'Effacement…': 'Clearing…',
   'Effacer les données': 'Clear data',
+
+  // AuthDialog (HTTP Basic/Digest/proxy authentication)
+  'Connexion requise': 'Sign in required',
+  '{host} demande un identifiant.': '{host} is asking for credentials.',
+  'Le proxy {host} demande un identifiant.': 'The proxy {host} is asking for credentials.',
+  'Nom d’utilisateur': 'Username',
+  'Mot de passe': 'Password',
+  'Se connecter': 'Sign in',
 };

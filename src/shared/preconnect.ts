@@ -16,7 +16,7 @@
 export type HintStrength = 'resolve' | 'preconnect';
 
 export type HintTarget = {
-  /** scheme://host[:port] — never a path, a query or credentials. */
+  /** scheme://host[:port] : never a path, a query or credentials. */
   origin: string;
   host: string;
 };

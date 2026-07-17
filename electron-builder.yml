@@ -68,6 +68,10 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Voksa
+  # Default-browser registration (RegisteredApplications + Capabilities +
+  # ProgID): what makes Voksa appear in Windows Settings > Default apps.
+  # customInstall/customUnInstall macros; see the file for the trust model.
+  include: resources/installer.nsh
 
 mac:
   target:
@@ -115,6 +119,12 @@ linux:
   category: Network
   icon: resources/icon.png
   maintainer: Voksa <contact@voksa.app>
+  # x-scheme-handler/http(s) is what makes desktop environments list Voksa as
+  # a BROWSER (xdg-settings / GNOME default-apps read the .desktop MimeType).
+  desktop:
+    entry:
+      MimeType: x-scheme-handler/http;x-scheme-handler/https;text/html;application/xhtml+xml;
+      StartupWMClass: Voksa
   # package.json `description` is kept to just "Voksa" on purpose: on Windows
   # it becomes the exe's FileDescription, which the Task Manager displays for
   # EVERY Chromium child process. The long-form description lives here for

@@ -2,10 +2,13 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Camera,
   Check,
+  CheckCircle2,
+  ClipboardCheck,
   Eye,
   EyeOff,
   Fingerprint,
   Globe,
+  Headphones,
   History,
   Lock,
   Mail,
@@ -19,13 +22,17 @@ import {
   RotateCcw,
   Server,
   Shield,
+  Siren,
   Tag,
   Trash2,
   Video,
+  Volume2,
   Wifi,
   X,
 } from 'lucide-react';
 import { useStreamStore } from '../../stores/streamStore';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { voksa } from '../../lib/bridge';
 import { SettingsBackLink } from './SettingsBackLink';
 import { Toggle } from '../ui/Toggle';
 import { askConfirm } from '../ui/ConfirmDialog';
@@ -222,6 +229,34 @@ export function StreamPage(): React.ReactElement {
           concealed={config.enabled}
           onChange={(list) => void update({ customMasks: list })}
         />
+
+        <SectionTitle
+          icon={ClipboardCheck}
+          title={t('Vérification avant live')}
+          subtitle={t('Un audit en un clic de ce qu’un spectateur pourrait apercevoir dans Voksa avant de lancer le direct.')}
+        />
+        <PreflightCard />
+
+        <SectionTitle
+          icon={Siren}
+          title={t('Bouton panique')}
+          subtitle={t('Un raccourci SYSTÈME qui masque toutes les fenêtres et coupe tout le son, même quand OBS ou le jeu a le focus.')}
+        />
+        <PanicCard />
+
+        <SectionTitle
+          icon={Headphones}
+          title={t('Audio par onglet')}
+          subtitle={t('Sous Mode Stream, un onglet d’arrière-plan qui se met à jouer du son est coupé automatiquement ; la puce sur l’onglet le réautorise.')}
+        />
+        <AudioRoutingCard />
+
+        <SectionTitle
+          icon={Volume2}
+          title={t('Signaux sonores')}
+          subtitle={t('Des repères audio courts : vous ENTENDEZ l’état changer sans quitter OBS des yeux. OBS capte ces sons, comme les bips de Discord.')}
+        />
+        <SoundCuesCard />
       </div>
     </div>
   );
@@ -665,6 +700,218 @@ function MaskChip({
       >
         <X size={11} />
       </button>
+    </div>
+  );
+}
+
+/**
+ * Panic Key card: enable + rebind. The capture field records the NEXT chord
+ * pressed while focused (the standard rebind pattern): modifiers + one real
+ * key, refused otherwise. The hotkey itself is registered lazily by main
+ * (only while Stream Mode is armed), which the description says out loud.
+ */
+function PanicCard(): React.ReactElement {
+  const t = useT();
+  const settings = useSettingsStore((s) => s.settings);
+  const update = useSettingsStore((s) => s.update);
+  const [capturing, setCapturing] = useState(false);
+
+  const onCaptureKey = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (!capturing) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      setCapturing(false);
+      return;
+    }
+    // Pure-modifier presses are a chord in progress, not a chord.
+    if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
+    const mods: string[] = [];
+    if (e.ctrlKey || e.metaKey) mods.push('CommandOrControl');
+    if (e.altKey) mods.push('Alt');
+    if (e.shiftKey) mods.push('Shift');
+    if (mods.length === 0) return; // a bare letter cannot be a GLOBAL shortcut
+    let key = e.key;
+    if (key === ' ') key = 'Space';
+    else if (key.length === 1) key = key.toUpperCase();
+    void update({ panicKey: [...mods, key].join('+') });
+    setCapturing(false);
+  };
+
+  return (
+    <div className="bg-bg-elevated border border-border rounded-xl p-4 mb-10">
+      <div className="flex items-center gap-4">
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium text-fg">{t('Bouton panique')}</div>
+          <div className="mt-0.5 text-[12px] text-fg-muted">
+            {t('Rideau sur toutes les fenêtres + son coupé + Mode Stream armé. Second appui : tout revient (le Mode Stream reste armé).')}
+          </div>
+          <div className="mt-0.5 text-[12px] text-fg-subtle">
+            {t('Le raccourci n’est actif que pendant que le Mode Stream est armé.')}
+          </div>
+        </div>
+        <button
+          type="button"
+          data-voksa-panic-rebind
+          onClick={() => setCapturing(true)}
+          onKeyDown={onCaptureKey}
+          onBlur={() => setCapturing(false)}
+          disabled={!settings.panicKeyEnabled}
+          className={`flex-shrink-0 px-3 h-9 rounded-lg border text-sm font-mono transition-colors ${
+            capturing
+              ? 'border-stream text-stream bg-stream-muted'
+              : 'border-border text-fg hover:bg-bg-hover'
+          } disabled:opacity-50`}
+          title={t('Cliquer puis appuyer sur le nouveau raccourci')}
+        >
+          {capturing ? t('Appuyez sur un raccourci…') : settings.panicKey}
+        </button>
+        <Toggle
+          checked={settings.panicKeyEnabled}
+          onChange={(v) => void update({ panicKeyEnabled: v })}
+        />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * DMCA stage 2 explainer. The routing itself lives in the tab context menu
+ * (it is a per-tab gesture); this card makes it discoverable and states the
+ * honest scope: risk reduction, never "DMCA immunity".
+ */
+function AudioRoutingCard(): React.ReactElement {
+  const t = useT();
+  return (
+    <div className="rounded-2xl border border-border bg-bg-elevated p-5 mb-10">
+      <p className="text-[13px] text-fg leading-relaxed">
+        {t('Envoyez le son d’un onglet vers une autre sortie : clic droit sur l’onglet, « Sortie audio », choisissez votre casque. OBS, qui capte la sortie par défaut, n’entend plus cet onglet ; vous, si.')}
+      </p>
+      <p className="text-[12px] text-fg-muted leading-relaxed mt-2">
+        {t('Réduction de risque, pas une immunité : un lecteur intégré venant d’un autre site (iframe), une frame sans préchargement ou un flux DRM peut échapper au routage et rester sur la sortie système. Si le périphérique choisi disparaît, l’onglet revient sur la sortie système et le menu cesse de l’afficher : rien n’est prétendu couvert qui ne l’est pas.')}
+      </p>
+    </div>
+  );
+}
+
+/** Audio cue toggles. The cues are WebAudio beeps generated in the chrome UI
+ * (see SoundSignals in Chrome.tsx): no assets, nothing to load. */
+function SoundCuesCard(): React.ReactElement {
+  const t = useT();
+  const settings = useSettingsStore((s) => s.settings);
+  const update = useSettingsStore((s) => s.update);
+  const cues = settings.soundCues;
+
+  const row = (label: string, description: string, key: keyof typeof cues) => (
+    <div className="flex items-center gap-4 py-2.5">
+      <div className="flex-1 min-w-0">
+        <div className="text-sm text-fg">{label}</div>
+        <div className="text-[12px] text-fg-subtle">{description}</div>
+      </div>
+      <Toggle
+        checked={cues[key]}
+        onChange={(v) => void update({ soundCues: { ...cues, [key]: v } })}
+      />
+    </div>
+  );
+
+  return (
+    <div className="bg-bg-elevated border border-border rounded-xl px-4 py-1.5 divide-y divide-border">
+      {row(
+        t('Mode Stream armé / désarmé'),
+        t('Deux notes montantes à l’armement, descendantes au retrait.'),
+        'streamToggle',
+      )}
+      {row(t('Téléchargement terminé'), t('Un bip discret quand un fichier arrive.'), 'downloadDone')}
+      {row(t('Mise à jour prête'), t('Un bip quand une nouvelle version attend le redémarrage.'), 'updateReady')}
+    </div>
+  );
+}
+
+type PreflightFinding =
+  | { kind: 'sensitive-text'; tabId: string; label: string; where: 'title' | 'url' | 'both' }
+  | { kind: 'audible'; tabId: string; label: string };
+
+/**
+ * Go-Live Preflight card: one click audits every Voksa tab for what a viewer
+ * could catch (an email/IP/keyword in a title or URL, a background tab making
+ * sound), each with a one-click fix. The scan runs in main against the same
+ * mask config the page masker uses, so a finding is exactly what Stream Mode
+ * would mask. Honest scope: it audits VOKSA, not Discord or the desktop.
+ */
+function PreflightCard(): React.ReactElement {
+  const t = useT();
+  const [findings, setFindings] = useState<PreflightFinding[] | null>(null);
+  const [scanned, setScanned] = useState(0);
+  const [busy, setBusy] = useState(false);
+
+  const run = () => {
+    setBusy(true);
+    void voksa.preflight
+      .run()
+      .then((report) => {
+        setFindings(report.findings);
+        setScanned(report.scanned);
+      })
+      .finally(() => setBusy(false));
+  };
+
+  const resolve = (finding: PreflightFinding) => {
+    if (finding.kind === 'audible') void voksa.tabs.mute(finding.tabId, true);
+    else void voksa.tabs.close(finding.tabId);
+    // Drop it from the list optimistically; a re-scan confirms.
+    setFindings((prev) => (prev ? prev.filter((f) => f !== finding) : prev));
+  };
+
+  return (
+    <div className="bg-bg-elevated border border-border rounded-xl p-4 mb-10">
+      <div className="flex items-center gap-4">
+        <div className="flex-1 min-w-0 text-[12px] text-fg-subtle">
+          {t('L’audit couvre les onglets de Voksa. Il ne voit pas Discord, les notifications système ni le reste de l’écran.')}
+        </div>
+        <button
+          type="button"
+          data-voksa-preflight-run
+          onClick={run}
+          disabled={busy}
+          className="flex-shrink-0 px-3 h-9 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent-hover disabled:opacity-50 transition-colors"
+        >
+          {busy ? t('Analyse…') : t('Lancer la vérification')}
+        </button>
+      </div>
+
+      {findings !== null && (
+        <div className="mt-4" data-voksa-preflight-result={findings.length}>
+          {findings.length === 0 ? (
+            <div className="flex items-center gap-2 text-sm text-accent">
+              <CheckCircle2 size={16} />
+              {t('Rien à signaler sur {n} onglets.', { n: scanned })}
+            </div>
+          ) : (
+            <ul className="space-y-1.5">
+              {findings.map((f, i) => (
+                <li
+                  key={`${f.tabId}-${i}`}
+                  className="flex items-center gap-3 px-3 py-2 rounded-lg bg-bg-inset"
+                >
+                  <span className="flex-1 min-w-0 text-[13px] text-fg truncate">
+                    {f.kind === 'audible'
+                      ? t('Son en arrière-plan : {label}', { label: f.label })
+                      : t('Donnée sensible : {label}', { label: f.label })}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => resolve(f)}
+                    className="flex-shrink-0 px-2.5 h-8 rounded-lg text-[12px] font-medium text-white bg-stream hover:opacity-90"
+                  >
+                    {f.kind === 'audible' ? t('Couper le son') : t('Fermer l’onglet')}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   );
 }

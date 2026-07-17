@@ -22,6 +22,9 @@ const DEFAULTS: AppSettings = {
   startupMode: DEFAULT_STARTUP_MODE,
   startupUrls: [],
   preconnect: true,
+  panicKeyEnabled: true,
+  panicKey: 'CommandOrControl+Alt+P',
+  soundCues: { streamToggle: true, downloadDone: false, updateReady: false },
 };
 
 type SettingsState = {

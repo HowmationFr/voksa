@@ -153,15 +153,13 @@ describe('CurtainController', () => {
   });
 
   describe('in-flight raise window (ack still pending)', () => {
-    // These tests PIN THE CURRENT semantics of the window between
-    // overlay.acquire() and the UI ack: records.get(tabId) is still undefined,
-    // so every tab-scoped signal (ready, drop, tab-closed) silently no-ops and
-    // the record only materializes once the ack lands. The overlay key
-    // acquired at raise() is then held by that materialized record until a
-    // LATER signal clears it, with the 6s safety timeout as the guaranteed
-    // backstop: the key can be held up to 6s too long, but never leaks
-    // permanently. If a change makes these signals apply during the window,
-    // update these tests deliberately.
+    // The record is registered SYNCHRONOUSLY at raise(), BEFORE the UI ack is
+    // awaited: so every tab-scoped signal (ready, drop, tab-closed) that lands
+    // during the window applies immediately instead of being lost. This is the
+    // fix for the hung-curtain race: a drop() arriving in this window (panic
+    // double-press, fast re-navigation) used to no-op and leave the curtain up
+    // until the 6s fail-to-blank. If a change reverts the ordering, these
+    // tests catch it.
 
     /** Start a solid raise with auto-ack off; raise() runs synchronously up to
      * the ack await, so CURTAIN_SET is already in `sent` when this returns. */
@@ -173,87 +171,84 @@ describe('CurtainController', () => {
       return { pending, ack: () => h.controller.ackFromUi(tabId, token) };
     }
 
-    it('a matching ready arriving during the window is lost: the curtain still materializes after the ack', async () => {
+    it('the record exists during the window: the tab is already active and keyed', async () => {
       const h = createHarness();
       const { pending, ack } = startPendingRaise(h, 'tab-1');
       expect(h.acquire).toHaveBeenCalledWith('curtain:tab-1');
       expect(h.isExpanded()).toBe(true);
-      expect(h.controller.isActive('tab-1')).toBe(false); // no record yet
-
-      // The doc pairing and its ready both land before the ack: both no-op
-      // because there is no record to pair or to clear yet.
-      h.controller.onDocStart('tab-1', 'doc-A');
-      h.controller.onReady('tab-1', 'doc-A');
-      expect(h.messages(IPC.CURTAIN_CLEAR)).toHaveLength(0);
-      expect(h.release).not.toHaveBeenCalled();
-
+      // The record is registered before the await, unlike the old behaviour.
+      expect(h.controller.isActive('tab-1')).toBe(true);
       ack();
       await pending;
-
-      // The early ready was dropped on the floor: the curtain comes up anyway
-      // and stays up until its own lifecycle ends. No nonce was paired (the
-      // doc-start no-oped too), so a re-sent ready would clear it; the path
-      // guaranteed by the protocol is the 6s fail-to-blank safety timeout.
       expect(h.controller.isActive('tab-1')).toBe(true);
-      expect(h.isExpanded()).toBe(true);
-
-      vi.advanceTimersByTime(SAFETY_TIMEOUT_MS);
-      expect(h.controller.isActive('tab-1')).toBe(false);
-      expect(h.messages(IPC.CURTAIN_CLEAR)).toHaveLength(1);
-      expect(h.release).toHaveBeenCalledTimes(1);
-      expect(h.isExpanded()).toBe(false);
     });
 
-    it('drop() during the window no-ops (no CURTAIN_CLEAR); the curtain materializes after the ack', async () => {
+    it('a matching ready arriving during the window drops the curtain', async () => {
       const h = createHarness();
       const { pending, ack } = startPendingRaise(h, 'tab-1');
 
-      // Force-drop (e.g. stream toggled off) during the in-flight window:
-      // there is no record yet, so nothing is cleared and nothing is sent.
+      // The doc pairing and its ready both land before the ack, and both take
+      // effect: the record is present to pair and to clear.
+      h.controller.onDocStart('tab-1', 'doc-A');
+      h.controller.onReady('tab-1', 'doc-A');
+      expect(h.controller.isActive('tab-1')).toBe(false);
+      expect(h.messages(IPC.CURTAIN_CLEAR)).toHaveLength(1);
+      expect(h.release).toHaveBeenCalledWith('curtain:tab-1');
+      expect(h.isExpanded()).toBe(false);
+
+      // The ack still resolves raise() harmlessly; nothing re-materializes.
+      ack();
+      await pending;
+      expect(h.controller.isActive('tab-1')).toBe(false);
+      expect(h.messages(IPC.CURTAIN_CLEAR)).toHaveLength(1);
+    });
+
+    it('drop() during the window clears immediately (the hung-curtain race fix)', async () => {
+      const h = createHarness();
+      const { pending, ack } = startPendingRaise(h, 'tab-1');
+
+      // Force-drop (panic double-press, stream toggled off) during the window:
+      // the record is there, so it clears at once instead of hanging.
       h.controller.drop('tab-1');
-      expect(h.messages(IPC.CURTAIN_CLEAR)).toHaveLength(0);
-      expect(h.release).not.toHaveBeenCalled();
-      expect(h.isExpanded()).toBe(true);
+      expect(h.messages(IPC.CURTAIN_CLEAR)).toHaveLength(1);
+      expect(h.release).toHaveBeenCalledWith('curtain:tab-1');
+      expect(h.isExpanded()).toBe(false);
+      expect(h.controller.isActive('tab-1')).toBe(false);
 
       ack();
       await pending;
-
-      // The drop was lost: the curtain comes up anyway and the overlay key
-      // stays held. A later drop/ready would clear it; the safety timeout is
-      // the guaranteed backstop, so the key cannot leak forever.
-      expect(h.controller.isActive('tab-1')).toBe(true);
-      expect(h.isExpanded()).toBe(true);
-
-      vi.advanceTimersByTime(SAFETY_TIMEOUT_MS);
+      // The curtain does NOT come back after the late ack.
       expect(h.controller.isActive('tab-1')).toBe(false);
       expect(h.messages(IPC.CURTAIN_CLEAR)).toHaveLength(1);
-      expect(h.release).toHaveBeenCalledTimes(1);
       expect(h.isExpanded()).toBe(false);
     });
 
-    it('handleTabClosed() during the window no-ops; the ghost curtain holds the key until the safety timeout', async () => {
+    it('handleTabClosed() during the window releases the key immediately', async () => {
       const h = createHarness();
       const { pending, ack } = startPendingRaise(h, 'tab-1');
 
       h.controller.handleTabClosed('tab-1');
-      expect(h.messages(IPC.CURTAIN_CLEAR)).toHaveLength(0);
-      expect(h.release).not.toHaveBeenCalled();
-
-      ack();
-      await pending;
-
-      // A curtain record now exists for a tab that no longer does: the chrome
-      // stays expanded for up to 6s, then the safety timeout releases the key
-      // and sends a CURTAIN_CLEAR for the dead tab id. Held too long, but not
-      // a permanent leak.
-      expect(h.controller.isActive('tab-1')).toBe(true);
-      expect(h.isExpanded()).toBe(true);
-
-      vi.advanceTimersByTime(SAFETY_TIMEOUT_MS);
-      expect(h.controller.isActive('tab-1')).toBe(false);
       expect(h.messages(IPC.CURTAIN_CLEAR).map((m) => m.payload.tabId)).toEqual(['tab-1']);
       expect(h.release).toHaveBeenCalledWith('curtain:tab-1');
       expect(h.isExpanded()).toBe(false);
+
+      ack();
+      await pending;
+      expect(h.controller.isActive('tab-1')).toBe(false);
+      expect(h.isExpanded()).toBe(false);
+    });
+
+    it('the safety timer set at raise() still fires when nothing else clears', async () => {
+      const h = createHarness();
+      const { pending, ack } = startPendingRaise(h, 'tab-1');
+      ack();
+      await pending;
+      // No ready, no drop: the fail-to-blank backstop still holds.
+      expect(h.controller.isActive('tab-1')).toBe(true);
+      vi.advanceTimersByTime(SAFETY_TIMEOUT_MS);
+      expect(h.controller.isActive('tab-1')).toBe(false);
+      expect(h.messages(IPC.CURTAIN_CLEAR)).toHaveLength(1);
+      expect(h.release).toHaveBeenCalledWith('curtain:tab-1');
     });
   });
 

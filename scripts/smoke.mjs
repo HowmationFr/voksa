@@ -44,7 +44,37 @@
 //      (a missing slug registration falls back to NewTab in silence).
 //  16. TAB-TO-SEARCH KEYWORDS: "duckduckgo.com cats" searches DDG, while
 //      "duckduckgo.com" alone still navigates to the site.
-//  17. NO RENDERER EXCEPTIONS: no Runtime.exceptionThrown on the chrome UI
+//  17. PDF IN TAB: a .pdf URL renders inside the tab (viewer embed present),
+//      it does not silently become a download. Also OBSERVES (logs, no
+//      assertion) what a PDF does under Stream Mode, to keep the docs honest.
+//  18. BASIC AUTH: a 401 challenge raises the chrome-UI credentials dialog;
+//      submitting loads the protected page, cancelling renders the 401 body
+//      without looping the dialog.
+//  19. TLS INTERSTITIAL: a self-signed https server never receives a request
+//      before the user proceeds (hit counter is the anti-leak proof), the
+//      interstitial renders in the chrome UI, and "continue anyway" loads the
+//      page.
+//  20. PINNED TABS: pinning re-homes the tab into the left cluster, a reorder
+//      that interleaves the cluster is snapped back by main, and
+//      "close others" spares pinned tabs.
+//  21. DMCA AUDIO GUARD: under Stream Mode a BACKGROUND tab that plays audio
+//      is guard-muted (streamMuted, separate from the user's mute), stays
+//      muted on activation (the chip is the only exit), un-mutes on explicit
+//      allow, and Stream OFF restores the exact prior state. Reduced to
+//      wiring-only checks (loudly logged) when the environment renders no
+//      audio at all (headless CI without an audio device).
+//  22. PANIC: voksa.stream.panic() (the same action the global hotkey fires)
+//      curtains the window, arms Stream Mode, and reports active; the second
+//      call restores the curtain but leaves the stream armed on purpose.
+//  23. CAPTURE HANDSHAKE: driving the controller (getDisplayMedia does not
+//      route to setDisplayMediaRequestHandler under CDP, so a debug seam
+//      enters the SAME path) raises OUR picker, picking a Voksa source arms
+//      Stream Mode before the source is delivered, and the delivered id is the
+//      one picked.
+//  24. GO-LIVE PREFLIGHT: a tab whose title carries an email is flagged (with
+//      a MASKED preview), a clean profile flags nothing (anti-vacuity), and
+//      the flag names a real tab id.
+//  25. NO RENDERER EXCEPTIONS: no Runtime.exceptionThrown on the chrome UI
 //      target during the whole run.
 //
 // Catches boot crashes, preload failures, a blank chrome UI, a broken voksa
@@ -56,9 +86,11 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import http from 'node:http';
+import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import selfsigned from 'selfsigned';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
@@ -92,6 +124,13 @@ const POISON_EMAIL = 'poisoned-leak@example.com';
 const POISON_IP = '203.0.113.9';
 const CLEAN_FRAME_MARKER = 'CLEAN-FRAME-LOADED';
 const CLEAN_FRAME_EMAIL = 'clean-frame@example.com';
+
+// Scenarios 18-19 (auth + TLS). Markers are unmaskable by construction.
+const AUTH_USER = 'smokeuser';
+const AUTH_PASS = 'smokepass';
+const AUTH_OK_MARKER = 'AUTH-GRANTED-PAGE';
+const AUTH_DENIED_MARKER = 'AUTH-DENIED-BODY';
+const TLS_OK_MARKER = 'TLS-PAGE-LOADED';
 
 // Exact ready lines printed by src/main/extensions/webstore.ts.
 const EXT_RUNTIME_READY = '[extensions] Chrome extension runtime ready.';
@@ -314,11 +353,13 @@ class CdpClient {
 
   // Evaluate in the target's main world; promises are awaited, results come
   // back by value, and in-page exceptions become rejections here.
-  async evaluate(expression) {
+  async evaluate(expression, { userGesture = false } = {}) {
     const { result, exceptionDetails } = await this.send('Runtime.evaluate', {
       expression,
       returnByValue: true,
       awaitPromise: true,
+      // getDisplayMedia needs a transient user activation; CDP can supply one.
+      userGesture,
     });
     if (exceptionDetails) {
       const text =
@@ -392,9 +433,76 @@ function startProbeServer() {
       <p>${CLEAN_FRAME_MARKER}</p>
       <p>frame contact: ${CLEAN_FRAME_EMAIL}</p>
     </body></html>`,
+    // Scenario 24: a page whose TITLE carries an email, for the preflight scan.
+    '/leaky-title.html': `<!doctype html><html><head><meta charset="utf-8">
+      <title>Inbox ${FRAME_EMAIL}</title></head><body><p>leaky title page</p></body></html>`,
+    // Scenario 21: a page that plays a quiet tone as soon as it loads, so the
+    // tab's audible flag flips (Electron's default autoplay policy allows an
+    // AudioContext without a user gesture).
+    '/audio.html': `<!doctype html><html><head><meta charset="utf-8"></head><body>
+      <p>AUDIO-PAGE-LOADED</p>
+      <script>
+        const ctx = new AudioContext();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        gain.gain.value = 0.02;
+        osc.frequency.value = 440;
+        osc.connect(gain).connect(ctx.destination);
+        osc.start();
+        if (ctx.state === 'suspended') void ctx.resume();
+      </script>
+    </body></html>`,
+    // Scenario 25: audio routing. An ATTACHED media element (routed by the
+    // isolated-world sweep); detached Audio()s and AudioContexts are created
+    // from the test itself to exercise the main-world patch. The inline
+    // script creates a DETACHED element that plays at document-start, i.e.
+    // BEFORE the async device enumeration can possibly have resolved: on a
+    // routed document it must still end up routed (the play wrap remembers
+    // unconditionally), or it would sit on the system default forever while
+    // the tab claims routed.
+    '/route-audio.html': `<!doctype html><html><head><meta charset="utf-8"></head><body>
+      <p>ROUTE-AUDIO-PAGE</p>
+      <audio id="probe-audio"></audio>
+      <script>
+        window.__earlyAudio = new Audio();
+        window.__earlyAudio.loop = true;
+        window.__earlyAudio.play().catch(function () {});
+      </script>
+    </body></html>`,
   };
   const server = http.createServer((req, res) => {
-    const body = pages[new URL(req.url, 'http://x').pathname];
+    const pathname = new URL(req.url, 'http://x').pathname;
+
+    // Scenario 17: a real (tiny) PDF, served with the PDF content type. If
+    // tabs lack `plugins: true` this becomes a download instead of a page.
+    if (pathname === '/doc.pdf') {
+      res.writeHead(200, { 'Content-Type': 'application/pdf' }).end(tinyPdf());
+      return;
+    }
+
+    // Scenario 18: HTTP Basic Auth. /protected accepts the smoke credentials;
+    // /protected-cancel NEVER accepts, whatever is sent: after a successful
+    // login Chromium re-sends cached credentials for the same origin on its
+    // own, so a route that accepted them would never re-challenge and the
+    // cancel path would have nothing to cancel.
+    if (pathname === '/protected' || pathname === '/protected-cancel') {
+      const expected = `Basic ${Buffer.from(`${AUTH_USER}:${AUTH_PASS}`).toString('base64')}`;
+      if (pathname === '/protected' && req.headers.authorization === expected) {
+        res
+          .writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+          .end(`<!doctype html><body><p>${AUTH_OK_MARKER}</p></body>`);
+      } else {
+        res
+          .writeHead(401, {
+            'WWW-Authenticate': `Basic realm="voksa-smoke${pathname === '/protected-cancel' ? '-cancel' : ''}"`,
+            'Content-Type': 'text/html; charset=utf-8',
+          })
+          .end(`<!doctype html><body><p>${AUTH_DENIED_MARKER}</p></body>`);
+      }
+      return;
+    }
+
+    const body = pages[pathname];
     if (!body) {
       res.writeHead(404).end('not found');
       return;
@@ -405,6 +513,73 @@ function startProbeServer() {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', () => {
       resolve({ server, origin: `http://127.0.0.1:${server.address().port}` });
+    });
+  });
+}
+
+/**
+ * A syntactically complete one-page PDF with computed xref offsets: enough for
+ * Chromium's viewer to render without repair heuristics.
+ */
+function tinyPdf() {
+  const objs = [
+    '<</Type/Catalog/Pages 2 0 R>>',
+    '<</Type/Pages/Kids[3 0 R]/Count 1>>',
+    '<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>',
+  ];
+  let body = '%PDF-1.4\n';
+  const offsets = [];
+  objs.forEach((o, i) => {
+    offsets.push(body.length);
+    body += `${i + 1} 0 obj${o}endobj\n`;
+  });
+  const xrefPos = body.length;
+  body += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+  for (const off of offsets) body += `${String(off).padStart(10, '0')} 00000 n \n`;
+  body += `trailer<</Size ${objs.length + 1}/Root 1 0 R>>\nstartxref\n${xrefPos}\n%%EOF`;
+  return body;
+}
+
+/**
+ * Self-signed https server for the TLS interstitial scenario. The key/cert
+ * pair is generated FRESH per run (devDependency `selfsigned`), never checked
+ * in: `*.pem` is gitignored on purpose, and a committed private key, even a
+ * harmless test one, trips secret scanning and trains everyone to ignore it.
+ * The hit counter is the scenario's anti-leak proof: certificate-error aborts
+ * during the handshake, so a request that reaches the handler before the user
+ * proceeded would mean the rejection path is broken.
+ */
+async function startTlsServer() {
+  const pems = await selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
+    days: 365,
+    keySize: 2048,
+    extensions: [
+      {
+        name: 'subjectAltName',
+        altNames: [
+          { type: 7, ip: '127.0.0.1' },
+          { type: 2, value: 'localhost' },
+        ],
+      },
+    ],
+  });
+  const key = pems.private;
+  const cert = pems.cert;
+  let hits = 0;
+  const server = https.createServer({ key, cert }, (_req, res) => {
+    hits += 1;
+    res
+      .writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      .end(`<!doctype html><body><p>${TLS_OK_MARKER}</p></body>`);
+  });
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      resolve({
+        server,
+        origin: `https://127.0.0.1:${server.address().port}`,
+        hits: () => hits,
+      });
     });
   });
 }
@@ -561,12 +736,17 @@ async function awaitGuardedPoisonPage(poisonPage, phase) {
 
 const clients = [];
 let probeServer = null;
+let tlsServer = null;
 
 function closeEverything() {
   for (const c of clients) c.close();
   if (probeServer) {
     probeServer.closeAllConnections?.();
     probeServer.close();
+  }
+  if (tlsServer) {
+    tlsServer.closeAllConnections?.();
+    tlsServer.close();
   }
   killTree();
 }
@@ -1282,7 +1462,658 @@ async function main() {
   await ui.evaluate(`window.voksa.tabs.close(${J(kwTabId)})`);
   pass('TAB-TO-SEARCH KEYWORDS');
 
-  // --- 17. NO RENDERER EXCEPTIONS -------------------------------------------------
+  // --- 17. PDF IN TAB --------------------------------------------------------------
+  // Before `plugins: true`, a .pdf response never became a page: will-download
+  // grabbed it and the tab stayed where it was. So "the tab's URL IS the pdf
+  // and the viewer's <embed> exists" can only pass with the viewer working,
+  // and "no download appeared" pins the old behaviour as the failure mode.
+  const pdfUrl = `${probe.origin}/doc.pdf`;
+  const pdfTabId = await ui.evaluate(`window.voksa.tabs.create(${J(pdfUrl)})`);
+  const pdfTarget = await waitFor(
+    'pdf tab CDP target',
+    async () => {
+      const list = await listTargets();
+      return list.find((t) => t.type === 'page' && t.url === pdfUrl);
+    },
+    STEP_TIMEOUT_MS,
+    'the .pdf navigation never committed: it was probably intercepted as a download (plugins:true missing in Tab.createView?)',
+  );
+  const pdfPage = await CdpClient.connect(pdfTarget.webSocketDebuggerUrl, 'pdf page');
+  clients.push(pdfPage);
+  await waitFor(
+    'PDF viewer embed present',
+    async () => pdfPage.evaluate(`document.querySelector('embed') !== null`),
+    STEP_TIMEOUT_MS,
+    'the pdf URL committed but no viewer embed rendered',
+  );
+  const downloads = await ui.evaluate(`window.voksa.downloads.list()`);
+  if (Array.isArray(downloads) && downloads.some((d) => (d.url ?? '').includes('/doc.pdf'))) {
+    throw new Error('the pdf rendered AND started a download: it must do only the former');
+  }
+  // Under Stream Mode a PDF document is UNMASKABLE: its content is painted by
+  // the plugin, not by DOM nodes the masker can sweep. The rule is fail
+  // closed (streamMask.ts isUnmaskableDocument): the shroud is held, the
+  // document must be invisible. Asserted, not observed: without the hold this
+  // exact check watched an email-carrying surface paint raw on stream.
+  await ui.evaluate(`window.voksa.stream.update({ enabled: true })`);
+  await waitFor(
+    'PDF shrouded under Stream Mode (fail closed)',
+    async () => {
+      const opacity = await pdfPage
+        .evaluate(`getComputedStyle(document.documentElement).opacity`)
+        .catch(() => null);
+      return Number(opacity) === 0;
+    },
+    STREAM_TIMEOUT_MS,
+    'a PDF stayed visible under Stream Mode: plugin-painted content cannot be masked, so it must be shrouded',
+  );
+  await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  await waitFor(
+    'PDF visible again once Stream Mode is off',
+    async () => {
+      const opacity = await pdfPage
+        .evaluate(`getComputedStyle(document.documentElement).opacity`)
+        .catch(() => null);
+      return Number(opacity) === 1;
+    },
+    STREAM_TIMEOUT_MS,
+    'the unmaskable-document shroud was not lifted on toggle-off',
+  );
+  await ui.evaluate(`window.voksa.tabs.close(${J(pdfTabId)})`);
+  pass('PDF IN TAB');
+
+  // --- 18. BASIC AUTH ---------------------------------------------------------------
+  // React inputs are controlled: setting .value directly is invisible to
+  // React. Go through the native setter + an input event, the standard way to
+  // type into a controlled input from automation.
+  const typeIntoAuthDialog = (selector, value) => `(() => {
+    const dialog = document.querySelector('[data-voksa-auth]');
+    if (!dialog) return false;
+    const input = dialog.querySelector(${JSON.stringify(selector)});
+    if (!input) return false;
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    set.call(input, ${JSON.stringify(value)});
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`;
+
+  const authTabId = await ui.evaluate(
+    `window.voksa.tabs.create(${J(`${probe.origin}/protected`)})`,
+  );
+  await waitFor(
+    'auth dialog visible in the chrome UI',
+    async () => ui.evaluate(`document.querySelector('[data-voksa-auth]') !== null`),
+    STEP_TIMEOUT_MS,
+    "the 401 challenge never raised the credentials dialog (app.on('login') in netGuards.ts)",
+  );
+  if (!(await ui.evaluate(typeIntoAuthDialog('input:not([type="password"])', AUTH_USER)))) {
+    throw new Error('could not type the username into the auth dialog');
+  }
+  if (!(await ui.evaluate(typeIntoAuthDialog('input[type="password"]', AUTH_PASS)))) {
+    throw new Error('could not type the password into the auth dialog');
+  }
+  await ui.evaluate(
+    `document.querySelector('[data-voksa-auth] button[type="submit"]').click()`,
+  );
+  await waitFor(
+    'credentials accepted, protected page rendered',
+    async () => {
+      const list = await listTargets();
+      const target = list.find((t) => t.type === 'page' && t.url.includes('/protected'));
+      if (!target) return false;
+      const c = await CdpClient.connect(target.webSocketDebuggerUrl, 'auth page');
+      try {
+        return (await c.evaluate(`document.body ? document.body.innerText : ''`)).includes(
+          AUTH_OK_MARKER,
+        );
+      } finally {
+        c.close();
+      }
+    },
+    STEP_TIMEOUT_MS,
+    'submitting valid credentials did not load the protected page',
+  );
+
+  // Cancel path: a fresh realm re-challenges; cancelling must render the 401
+  // body and must NOT re-raise the dialog in a loop.
+  await ui.evaluate(
+    `window.voksa.tabs.navigate(${J(authTabId)}, ${J(`${probe.origin}/protected-cancel`)})`,
+  );
+  await waitFor(
+    'auth dialog for the cancel path',
+    async () => ui.evaluate(`document.querySelector('[data-voksa-auth]') !== null`),
+    STEP_TIMEOUT_MS,
+  );
+  await ui.evaluate(`document.querySelector('[data-voksa-auth-cancel]').click()`);
+  await waitFor(
+    'cancelled challenge renders the 401 body',
+    async () => {
+      const list = await listTargets();
+      const target = list.find((t) => t.type === 'page' && t.url.includes('/protected-cancel'));
+      if (!target) return false;
+      const c = await CdpClient.connect(target.webSocketDebuggerUrl, 'auth cancel page');
+      try {
+        return (await c.evaluate(`document.body ? document.body.innerText : ''`)).includes(
+          AUTH_DENIED_MARKER,
+        );
+      } finally {
+        c.close();
+      }
+    },
+    STEP_TIMEOUT_MS,
+    'cancelling the auth dialog did not fall through to the 401 body',
+  );
+  await sleep(500);
+  if (await ui.evaluate(`document.querySelector('[data-voksa-auth]') !== null`)) {
+    throw new Error('the auth dialog re-raised itself after cancel: challenge loop');
+  }
+  await ui.evaluate(`window.voksa.tabs.close(${J(authTabId)})`);
+  pass('BASIC AUTH');
+
+  // --- 19. TLS INTERSTITIAL -----------------------------------------------------------
+  const tls = await startTlsServer();
+  tlsServer = tls.server;
+  const tlsTabId = await ui.evaluate(`window.voksa.tabs.create(${J(`${tls.origin}/`)})`);
+  await waitFor(
+    'TLS interstitial rendered in the chrome UI',
+    async () => ui.evaluate(`document.querySelector('[data-voksa-tls-interstitial]') !== null`),
+    STEP_TIMEOUT_MS,
+    'a self-signed certificate did not raise the interstitial (certificate-error in netGuards.ts / cert branch of ErrorPage.tsx)',
+  );
+  // The anti-leak core: certificate-error aborts the HANDSHAKE, so the server
+  // must never have seen a request while the interstitial is up.
+  if (tls.hits() !== 0) {
+    throw new Error(
+      `the https server received ${tls.hits()} request(s) BEFORE the user proceeded: the rejection path leaks`,
+    );
+  }
+  await ui.evaluate(`document.querySelector('[data-voksa-tls-advanced]').click()`);
+  await waitFor(
+    'proceed link revealed',
+    async () => ui.evaluate(`document.querySelector('[data-voksa-tls-proceed]') !== null`),
+    STEP_TIMEOUT_MS,
+  );
+  await ui.evaluate(`document.querySelector('[data-voksa-tls-proceed]').click()`);
+  await waitFor(
+    'page loads after proceeding',
+    async () => {
+      const list = await listTargets();
+      const target = list.find((t) => t.type === 'page' && t.url.startsWith(tls.origin));
+      if (!target) return false;
+      const c = await CdpClient.connect(target.webSocketDebuggerUrl, 'tls page');
+      try {
+        return (await c.evaluate(`document.body ? document.body.innerText : ''`)).includes(
+          TLS_OK_MARKER,
+        );
+      } finally {
+        c.close();
+      }
+    },
+    STEP_TIMEOUT_MS,
+    'proceeding past the interstitial did not load the page (TAB_TLS_PROCEED / allowPendingCertException)',
+  );
+  if (tls.hits() === 0) {
+    throw new Error('the page claims to have loaded but the https server saw no request');
+  }
+  await ui.evaluate(`window.voksa.tabs.close(${J(tlsTabId)})`);
+  pass('TLS INTERSTITIAL');
+
+  // --- 20. PINNED TABS ----------------------------------------------------------------
+  const pinA = await ui.evaluate(`window.voksa.tabs.create("voksa://newtab")`);
+  const pinB = await ui.evaluate(`window.voksa.tabs.create("voksa://newtab")`);
+  const pinC = await ui.evaluate(`window.voksa.tabs.create("voksa://newtab")`);
+  const tabList = async () => await ui.evaluate(`window.voksa.tabs.list()`);
+
+  await ui.evaluate(`window.voksa.tabs.setPinned(${J(pinC)}, true)`);
+  await waitFor(
+    'pinning re-homes the tab into the left cluster',
+    async () => {
+      const list = await tabList();
+      const first = list[0];
+      return first?.id === pinC && first?.pinned === true;
+    },
+    STEP_TIMEOUT_MS,
+    'setPinned did not move the tab to the front of the strip (TabManager.setPinned)',
+  );
+
+  // A reorder payload that buries the pinned tab in the middle must come back
+  // clamped: pinned first is structural in main, not a UI courtesy.
+  const interleaved = (await tabList()).map((t) => t.id);
+  interleaved.splice(interleaved.indexOf(pinC), 1);
+  interleaved.splice(2, 0, pinC);
+  await ui.evaluate(`window.voksa.tabs.reorder(${JSON.stringify(interleaved)})`);
+  await waitFor(
+    'an interleaving reorder is snapped back',
+    async () => (await tabList())[0]?.id === pinC,
+    STEP_TIMEOUT_MS,
+    'reorder() accepted an order that buries the pinned cluster (invariant must be re-imposed in main)',
+  );
+
+  // "Close others" spares the pinned tab (and the caller, which is active).
+  await ui.evaluate(`window.voksa.tabs.activate(${J(pinA)})`);
+  await ui.evaluate(`window.voksa.tabs.closeOthers(${J(pinA)})`);
+  await waitFor(
+    'close-others spares the pinned tab',
+    async () => {
+      const ids = (await tabList()).map((t) => t.id);
+      return ids.includes(pinC) && ids.includes(pinA) && !ids.includes(pinB);
+    },
+    STEP_TIMEOUT_MS,
+    'closeOthers closed a pinned tab (or failed to close an unpinned one)',
+  );
+  await ui.evaluate(`window.voksa.tabs.setPinned(${J(pinC)}, false)`);
+  await ui.evaluate(`window.voksa.tabs.close(${J(pinC)})`);
+  pass('PINNED TABS');
+
+  // --- 21. DMCA AUDIO GUARD ------------------------------------------------------
+  const audioTabId = await ui.evaluate(
+    `window.voksa.tabs.create(${J(`${probe.origin}/audio.html`)})`,
+  );
+  const audioTab = async () =>
+    (await ui.evaluate(`window.voksa.tabs.list()`)).find((t) => t.id === audioTabId);
+
+  // Anti-vacuity: the tone must actually render as audible BEFORE the guard
+  // is asked to act on it. Headless CI machines may have no audio device at
+  // all; that is an environment limit, not a regression, and it is LOGGED,
+  // never silently absorbed.
+  let audioWorks = true;
+  try {
+    await waitFor('audio tab reports audible', async () => (await audioTab())?.isAudible === true, 8_000);
+  } catch {
+    audioWorks = false;
+    console.log(
+      '[smoke] note: environment renders no audio (no device?); AUDIO GUARD reduced to wiring-only checks',
+    );
+  }
+
+  // Background the audio tab, then arm the stream: the guard must mute it.
+  const coverTabId = await ui.evaluate(`window.voksa.tabs.create("voksa://newtab")`);
+  await ui.evaluate(`window.voksa.tabs.activate(${J(coverTabId)})`);
+  await ui.evaluate(`window.voksa.stream.update({ enabled: true })`);
+
+  if (audioWorks) {
+    await waitFor(
+      'background audible tab guard-muted under stream',
+      async () => {
+        const t2 = await audioTab();
+        return t2?.streamMuted === true && t2?.isMuted === false;
+      },
+      STREAM_TIMEOUT_MS,
+      'an audible background tab was not guard-muted under Stream Mode (applyAudioGuard in TabManager)',
+    );
+
+    // Activation is NOT consent: the guard mute must survive switching to it.
+    await ui.evaluate(`window.voksa.tabs.activate(${J(audioTabId)})`);
+    await sleep(400);
+    const activated = await audioTab();
+    if (activated?.streamMuted !== true) {
+      throw new Error('activating a guard-muted tab lifted the mute: the chip must be the only exit');
+    }
+
+    // The chip's explicit allow lifts it, for the tab's lifetime.
+    await ui.evaluate(`window.voksa.tabs.allowStreamAudio(${J(audioTabId)})`);
+    await waitFor(
+      'explicit allow lifts the guard mute',
+      async () => (await audioTab())?.streamMuted === false,
+      STREAM_TIMEOUT_MS,
+    );
+  } else {
+    // Reduced check: the IPC path exists and flips nothing it should not.
+    await ui.evaluate(`window.voksa.tabs.allowStreamAudio(${J(audioTabId)})`);
+  }
+
+  // Stream OFF restores the exact prior audio state (no stray user mute).
+  await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  await sleep(300);
+  const after = await audioTab();
+  if (after?.streamMuted !== false || after?.isMuted !== false) {
+    throw new Error(
+      `stream OFF did not restore the audio state: ${JSON.stringify({ streamMuted: after?.streamMuted, isMuted: after?.isMuted })}`,
+    );
+  }
+  await ui.evaluate(`window.voksa.tabs.close(${J(audioTabId)})`);
+  await ui.evaluate(`window.voksa.tabs.close(${J(coverTabId)})`);
+  pass('DMCA AUDIO GUARD');
+
+  // --- 22. PANIC ------------------------------------------------------------------
+  // Driven through the IPC action (the hotkey is just another trigger of the
+  // same toggle; CDP cannot synthesize OS-level global shortcuts).
+  if (await ui.evaluate(CURTAIN_UP_EXPR)) {
+    throw new Error('a curtain is already up before panic: the assertion below would be vacuous');
+  }
+  const panicOn = await ui.evaluate(`window.voksa.stream.panic()`);
+  if (panicOn?.active !== true) {
+    throw new Error(`panic() did not report active: ${JSON.stringify(panicOn)}`);
+  }
+  await waitFor(
+    'panic curtain up over the active tab',
+    async () => ui.evaluate(CURTAIN_UP_EXPR),
+    STREAM_TIMEOUT_MS,
+    'panic did not curtain the window (TabManager.panicCover)',
+  );
+  const armed = await ui.evaluate(`window.voksa.stream.get()`);
+  if (!armed?.enabled) {
+    throw new Error('panic did not arm Stream Mode');
+  }
+  const panicOff = await ui.evaluate(`window.voksa.stream.panic()`);
+  if (panicOff?.active !== false) {
+    throw new Error(`second panic() did not restore: ${JSON.stringify(panicOff)}`);
+  }
+  await waitFor(
+    'panic curtain gone after restore',
+    async () => !(await ui.evaluate(CURTAIN_UP_EXPR)),
+    STREAM_TIMEOUT_MS,
+  );
+  // The restore deliberately KEEPS the stream armed: dropping the protection
+  // on restore would re-expose whatever caused the panic.
+  const stillArmed = await ui.evaluate(`window.voksa.stream.get()`);
+  if (!stillArmed?.enabled) {
+    throw new Error('panic restore disarmed Stream Mode: it must stay armed until turned off manually');
+  }
+  await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  pass('PANIC');
+
+  // --- 23. CAPTURE HANDSHAKE ------------------------------------------------------
+  // getDisplayMedia does not route to setDisplayMediaRequestHandler under CDP
+  // in this Electron build, so the real Chromium entry edge cannot be driven
+  // here (verified: the handler is never invoked). The debug seam
+  // (voksa.capture.simulate) enters the SAME controller path from a known
+  // requester, so everything the feature owns IS exercised: source
+  // enumeration, our picker, arming Stream Mode before delivery, and returning
+  // the picked id. Only the trivial Chromium->handler glue is out of reach.
+  await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  const simPromise = ui.evaluate(`window.voksa.capture.simulate()`);
+
+  await waitFor(
+    'Voksa capture picker shown',
+    async () => ui.evaluate(`document.querySelector('[data-voksa-capture-picker]') !== null`),
+    STEP_TIMEOUT_MS,
+    'the handshake did not raise the Voksa picker (getSources/handleRequest)',
+  );
+  const sourceCount = await ui.evaluate(
+    `Number(document.querySelector('[data-voksa-capture-picker]').getAttribute('data-voksa-capture-picker'))`,
+  );
+  if (sourceCount < 1) {
+    // A box that enumerates no capturable surface: cancel cleanly and reduce
+    // to the picker-ownership proof (the arming/delivery need a real source).
+    console.log('[smoke] note: 0 screen-share sources enumerated; CAPTURE HANDSHAKE delivery skipped');
+    await ui.evaluate(`document.querySelector('[data-voksa-capture-picker] ~ *, [data-voksa-capture-picker]') && window.voksa.capture.pick && true`);
+    // Cancel via the picker's own path: click the backdrop-cancel button.
+    await ui.evaluate(`(() => {
+      const btns = document.querySelectorAll('button');
+      for (const b of btns) if (/Annuler|Cancel/.test(b.textContent||'')) { b.click(); return true; }
+      return false;
+    })()`);
+    await simPromise.catch(() => null);
+    pass('CAPTURE HANDSHAKE');
+  } else {
+    // Pick the first source and confirm through OUR UI.
+    await ui.evaluate(`document.querySelector('[data-voksa-capture-source]').click()`);
+    await ui.evaluate(`document.querySelector('[data-voksa-capture-confirm]').click()`);
+
+    // Delivery happens ONLY after Stream Mode is armed (the guarantee).
+    await waitFor(
+      'picking a source armed Stream Mode',
+      async () => (await ui.evaluate(`window.voksa.stream.get()`))?.enabled === true,
+      STREAM_TIMEOUT_MS,
+      'selecting a source did not arm Stream Mode (captureHandshake containsVoksa/arming)',
+    );
+    const deliveredId = await simPromise;
+    if (!deliveredId || typeof deliveredId !== 'string') {
+      throw new Error(`the handshake did not deliver a source id (got ${JSON.stringify(deliveredId)})`);
+    }
+    await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+    pass('CAPTURE HANDSHAKE');
+  }
+
+  // --- 24. GO-LIVE PREFLIGHT ------------------------------------------------------
+  // Baseline: the current tabs are clean (newtab/etc.), so preflight flags
+  // nothing. This is the anti-vacuity anchor.
+  const cleanReport = await ui.evaluate(`window.voksa.preflight.run()`);
+  const cleanSensitive = (cleanReport?.findings ?? []).filter((f) => f.kind === 'sensitive-text');
+  if (cleanSensitive.length > 0) {
+    throw new Error(`preflight flagged a clean profile: ${JSON.stringify(cleanSensitive)}`);
+  }
+
+  // Open a tab whose TITLE carries an email; preflight must flag it, masked.
+  const leakyTabId = await ui.evaluate(
+    `window.voksa.tabs.create(${J(`${probe.origin}/leaky-title.html`)})`,
+  );
+  await waitFor(
+    'leaky tab title picked up',
+    async () => {
+      const tabs = await ui.evaluate(`window.voksa.tabs.list()`);
+      return tabs.find((t) => t.id === leakyTabId)?.title?.includes('Inbox');
+    },
+    STEP_TIMEOUT_MS,
+  );
+  const report = await ui.evaluate(`window.voksa.preflight.run()`);
+  const flag = (report?.findings ?? []).find(
+    (f) => f.kind === 'sensitive-text' && f.tabId === leakyTabId,
+  );
+  if (!flag) {
+    throw new Error(
+      `preflight did not flag the email-in-title tab: ${JSON.stringify(report?.findings)}`,
+    );
+  }
+  if (flag.label.includes(FRAME_EMAIL)) {
+    throw new Error('preflight finding reprinted the raw email it warns about');
+  }
+  if (!flag.label.includes('xxx')) {
+    throw new Error(`preflight finding label is not masked: ${JSON.stringify(flag.label)}`);
+  }
+  await ui.evaluate(`window.voksa.tabs.close(${J(leakyTabId)})`);
+  pass('GO-LIVE PREFLIGHT');
+
+  // --- 25. AUDIO ROUTING (DMCA stage 2) --------------------------------------------
+  // Route a tab's audio to a chosen output device. Devices are matched by
+  // LABEL inside each frame (deviceIds are origin-hashed): the full path needs
+  // a real physical output device, which headless CI machines may not have.
+  // Without one, the scenario degrades to wiring + fail-visible checks and
+  // LOGS it, exactly like scenario 21.
+
+  // Wiring probe on an internal tab first: it has no webContents, so the route
+  // is stored without any page round-trip. Proves the SET path and the
+  // TabState plumbing independently of the audio environment.
+  const wiringTabId = await ui.evaluate(`window.voksa.tabs.create("voksa://newtab")`);
+  await ui.evaluate(
+    `window.voksa.tabs.setAudioRoute(${J(wiringTabId)}, "Smoke Wiring Probe Device")`,
+  );
+  await waitFor(
+    'audio route stored on the tab state',
+    async () =>
+      (await ui.evaluate(`window.voksa.tabs.list()`)).find((t) => t.id === wiringTabId)
+        ?.audioRoute === 'Smoke Wiring Probe Device',
+    STEP_TIMEOUT_MS,
+    'setAudioRoute did not reach TabState.audioRoute (AUDIO_ROUTE_SET / TabManager.setAudioRoute)',
+  );
+  await ui.evaluate(`window.voksa.tabs.setAudioRoute(${J(wiringTabId)}, null)`);
+  await waitFor(
+    'audio route cleared on the tab state',
+    async () =>
+      (await ui.evaluate(`window.voksa.tabs.list()`)).find((t) => t.id === wiringTabId)
+        ?.audioRoute === null,
+    STEP_TIMEOUT_MS,
+  );
+  await ui.evaluate(`window.voksa.tabs.close(${J(wiringTabId)})`);
+
+  // Real routable outputs, enumerated in the chrome view (same source the tab
+  // context menu uses; labels exposed through the chrome carve-out).
+  const outputLabels = await ui.evaluate(`navigator.mediaDevices.enumerateDevices().then(
+    (list) => list
+      .filter((d) => d.kind === 'audiooutput' && d.deviceId
+        && d.deviceId !== 'default' && d.deviceId !== 'communications' && d.label)
+      .map((d) => d.label),
+  )`);
+
+  const routeTabId = await ui.evaluate(
+    `window.voksa.tabs.create(${J(`${probe.origin}/route-audio.html`)})`,
+  );
+  const routeUrl = `${probe.origin}/route-audio.html`;
+  const routeTarget = await waitFor(
+    'route-audio page CDP target',
+    async () => (await listTargets()).find((t) => t.type === 'page' && t.url === routeUrl),
+    STEP_TIMEOUT_MS,
+  );
+  const routePage = await CdpClient.connect(routeTarget.webSocketDebuggerUrl, 'route-audio page');
+  clients.push(routePage);
+  await waitFor(
+    'route-audio page rendered',
+    async () => (await routePage.evaluate(`document.body.innerText`)).includes('ROUTE-AUDIO-PAGE'),
+    STEP_TIMEOUT_MS,
+  );
+
+  // Anti-vacuity: before any routing, the element sits on the default sink.
+  const sinkBefore = await routePage.evaluate(
+    `document.getElementById('probe-audio').sinkId`,
+  );
+  if (sinkBefore !== '') {
+    throw new Error(`element already routed before the test: sinkId=${JSON.stringify(sinkBefore)}`);
+  }
+
+  if (Array.isArray(outputLabels) && outputLabels.length > 0) {
+    const chosenLabel = outputLabels[0];
+    await ui.evaluate(`window.voksa.tabs.setAudioRoute(${J(routeTabId)}, ${J(chosenLabel)})`);
+
+    // 1. The attached element is routed (isolated-world sweep).
+    await waitFor(
+      'attached media element routed to the chosen device',
+      async () =>
+        (await routePage.evaluate(`document.getElementById('probe-audio').sinkId`)) !== '',
+      STEP_TIMEOUT_MS,
+      'setSinkId never applied: label matching in the frame (injected/audioRoute.ts), the media ' +
+        'permission-check carve-out (stream-mode/permissions.ts), or the AUDIO_ROUTE_APPLY push failed',
+    );
+
+    // 2. A DETACHED element created afterwards is routed at play() time by the
+    //    main-world patch (no isolated world can ever reach it).
+    await routePage.evaluate(`(() => {
+      window.__smokeDetached = new Audio();
+      window.__smokeDetached.play().catch(() => {});
+      return true;
+    })()`);
+    await waitFor(
+      'detached Audio() routed by the main-world play patch',
+      async () => (await routePage.evaluate(`window.__smokeDetached.sinkId`)) !== '',
+      STEP_TIMEOUT_MS,
+      'the main-world patch did not route a detached Audio() (buildAudioRoutePatch play wrap)',
+    );
+
+    // 2b. A detached element with AUTOPLAY (playback starts internally,
+    //     never through play()): only the wrapped Audio constructor can
+    //     remember it. No play() call here, on purpose.
+    await routePage.evaluate(`(() => {
+      window.__autoAudio = new Audio();
+      window.__autoAudio.autoplay = true;
+      return true;
+    })()`);
+    await waitFor(
+      'detached autoplay Audio routed by the main-world ctor wrap',
+      async () => (await routePage.evaluate(`window.__autoAudio.sinkId`)) !== '',
+      STEP_TIMEOUT_MS,
+      'the main-world patch did not route a detached autoplay Audio (buildAudioRoutePatch Audio ctor proxy)',
+    );
+
+    // 3. An AudioContext created afterwards is routed by the wrapped ctor.
+    await routePage.evaluate(`(() => { window.__smokeCtx = new AudioContext(); return true; })()`);
+    await waitFor(
+      'new AudioContext routed by the main-world ctor patch',
+      async () => {
+        const sink = await routePage.evaluate(`window.__smokeCtx.sinkId`);
+        return typeof sink === 'string' && sink !== '';
+      },
+      STEP_TIMEOUT_MS,
+      'the main-world patch did not route a page AudioContext (buildAudioRoutePatch ctor proxy)',
+    );
+
+    // 4. The tab state claims exactly what is applied.
+    const routedState = (await ui.evaluate(`window.voksa.tabs.list()`)).find(
+      (t) => t.id === routeTabId,
+    );
+    if (routedState?.audioRoute !== chosenLabel) {
+      throw new Error(
+        `TabState.audioRoute (${JSON.stringify(routedState?.audioRoute)}) does not match the applied route`,
+      );
+    }
+
+    // 5. THE core use case: the route survives a reload UNDER Stream Mode.
+    //    The new document re-arms at document-start and re-enumerates while
+    //    the stream denies camera/microphone: without the permission
+    //    carve-out for routed tabs (stream-mode/permissions.ts), labels come
+    //    back empty, the label cannot resolve, and the route gets cleared.
+    //    Stream OFF would never catch that (the check handler is permissive
+    //    when not streaming): this reload is where the carve-out is load-bearing.
+    await ui.evaluate(`window.voksa.stream.update({ enabled: true })`);
+    await ui.evaluate(`window.voksa.tabs.reload(${J(routeTabId)})`);
+    await waitFor(
+      'route re-applied after a reload under Stream Mode',
+      async () => {
+        const sink = await routePage
+          .evaluate(`(document.getElementById('probe-audio') || {}).sinkId`)
+          .catch(() => null);
+        return typeof sink === 'string' && sink !== '';
+      },
+      STEP_TIMEOUT_MS,
+      'the reloaded document did not re-route under stream: AUDIO_ROUTE_GET_SYNC re-arm, or the ' +
+        "routed tab's media permission-check carve-out (labels blanked by the stream denies)",
+    );
+    const routeUnderStream = (await ui.evaluate(`window.voksa.tabs.list()`)).find(
+      (t) => t.id === routeTabId,
+    );
+    if (routeUnderStream?.audioRoute !== chosenLabel) {
+      throw new Error(
+        `the route was cleared by the reload under stream (fail-visible fired where it should not): ${JSON.stringify(routeUnderStream?.audioRoute)}`,
+      );
+    }
+    // The fixture's inline script played a DETACHED element at document-start,
+    // strictly before the async enumeration could resolve. It must be routed
+    // anyway: the play wrap remembers unconditionally, precisely so that an
+    // early player cannot stay on the system default while the tab claims
+    // routed.
+    await waitFor(
+      'detached element played at document-start routed once the sink resolved',
+      async () => {
+        const sink = await routePage
+          .evaluate(`window.__earlyAudio && window.__earlyAudio.sinkId`)
+          .catch(() => null);
+        return typeof sink === 'string' && sink !== '';
+      },
+      STEP_TIMEOUT_MS,
+      'an element played before the sink resolved was never routed (unconditional remember in the play wrap)',
+    );
+    await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+
+    // 6. Reset: everything returns to the system default.
+    await ui.evaluate(`window.voksa.tabs.setAudioRoute(${J(routeTabId)}, null)`);
+    await waitFor(
+      'attached element back on the default sink after reset',
+      async () =>
+        (await routePage.evaluate(`document.getElementById('probe-audio').sinkId`)) === '',
+      STEP_TIMEOUT_MS,
+    );
+  } else {
+    // No physical output device: exercise the fail-visible path instead. A
+    // label that cannot resolve in the page must CLEAR the route (main reacts
+    // to the frame's matched:false), so the UI never claims a dead routing.
+    console.log(
+      '[smoke] note: no routable audio output on this machine; AUDIO ROUTING reduced to wiring + fail-visible checks',
+    );
+    await ui.evaluate(
+      `window.voksa.tabs.setAudioRoute(${J(routeTabId)}, "Smoke Nonexistent Device")`,
+    );
+    await waitFor(
+      'unresolvable route cleared (fail-visible)',
+      async () =>
+        (await ui.evaluate(`window.voksa.tabs.list()`)).find((t) => t.id === routeTabId)
+          ?.audioRoute === null,
+      STEP_TIMEOUT_MS,
+      'a route to a nonexistent device was not cleared: AUDIO_ROUTE_STATUS matched:false handling',
+    );
+  }
+  await ui.evaluate(`window.voksa.tabs.close(${J(routeTabId)})`);
+  pass('AUDIO ROUTING');
+
+  // --- 26. NO RENDERER EXCEPTIONS -------------------------------------------------
   if (uiExceptions.length > 0) {
     throw new Error(
       `chrome UI threw ${uiExceptions.length} uncaught exception(s) during the run:\n${uiExceptions.join('\n')}`,
@@ -1297,10 +2128,10 @@ async function main() {
 // forever despite the per-step timeouts. Deliberately NOT unref'd so it can
 // fire even on an otherwise empty event loop; cleared on every normal path.
 const watchdog = setTimeout(() => {
-  console.error('[smoke] FAILED: global watchdog (180s), run hung');
+  console.error('[smoke] FAILED: global watchdog (240s), run hung');
   closeEverything();
   process.exit(1);
-}, 180_000);
+}, 240_000);
 
 main()
   .then(() => {

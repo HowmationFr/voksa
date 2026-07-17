@@ -41,6 +41,12 @@ export type TabSnapshot = {
   isMuted: boolean;
   /** voksa:// page: rendered by the chrome UI, holds no page to free. */
   isInternal: boolean;
+  /**
+   * Pinned by the user: a standing "keep this hot" declaration. Pinning is
+   * the explicit gesture for "always there when I click", so the sweep never
+   * touches it; the exception list stays for hosts, pinning is per tab.
+   */
+  isPinned: boolean;
   /** Already freed: nothing left to do. */
   isDiscarded: boolean;
   /** Mid-navigation: discarding now would race the load. */
@@ -155,6 +161,7 @@ export function isProtected(tab: TabSnapshot, exceptions: string[]): boolean {
     tab.isAudible ||
     tab.isMuted ||
     tab.isInternal ||
+    tab.isPinned ||
     tab.isDiscarded ||
     tab.isLoading ||
     tab.hasCurtain ||

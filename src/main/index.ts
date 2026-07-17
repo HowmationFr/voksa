@@ -201,11 +201,17 @@ async function createWindow(opts?: BootstrapOptions): Promise<AppWindow> {
 
 async function start() {
   await app.whenReady();
-  try {
-    app.setAsDefaultProtocolClient('http');
-    app.setAsDefaultProtocolClient('https');
-  } catch {
-    // best-effort; not fatal
+  // Packaged only: in dev this would register ELECTRON.EXE as an http handler
+  // in the developer's registry / LaunchServices. The real Windows candidacy
+  // (Settings > Default apps) comes from the NSIS installer registry keys
+  // (resources/installer.nsh), not from this call; macOS/Linux honour it.
+  if (app.isPackaged) {
+    try {
+      app.setAsDefaultProtocolClient('http');
+      app.setAsDefaultProtocolClient('https');
+    } catch {
+      // best-effort; not fatal
+    }
   }
 
   // App-global singletons, in dependency order and all BEFORE the first

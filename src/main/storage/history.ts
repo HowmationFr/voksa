@@ -59,6 +59,43 @@ export function recordVisit(url: string, title: string, faviconUrl: string | nul
   tx();
 }
 
+/**
+ * Bulk-merge imported history (browser import). Per URL: counts ADD, recency
+ * takes the max, and an existing row keeps its title and favicon (what Voksa
+ * observed beats what another browser recorded). One visits-timeline row is
+ * appended per imported URL at its last visit: imports carry per-URL
+ * aggregates, not per-visit timelines, and fabricating a fake timeline would
+ * pollute the time-ranged clear-browsing-data. Returns rows merged.
+ */
+export function importHistoryEntries(
+  entries: Array<{ url: string; title: string; visitCount: number; lastVisitAt: number }>,
+): number {
+  if (entries.length === 0) return 0;
+  const db = getDb();
+  const upsert = db.prepare(
+    `INSERT INTO urls (id, url, title, favicon_url, visit_count, last_visit_at, first_visit_at)
+     VALUES (?, ?, ?, NULL, ?, ?, ?)
+     ON CONFLICT(url) DO UPDATE SET
+       visit_count = visit_count + excluded.visit_count,
+       last_visit_at = MAX(last_visit_at, excluded.last_visit_at)`,
+  );
+  const selectId = db.prepare(`SELECT id FROM urls WHERE url = ?`);
+  const insertVisit = db.prepare(`INSERT INTO visits (id, url_id, visited_at) VALUES (?, ?, ?)`);
+  let merged = 0;
+  const tx = db.transaction(() => {
+    for (const e of entries) {
+      // Same gate as recordVisit: internal pages never enter history.
+      if (!e.url || e.url.startsWith('voksa://') || e.url.startsWith('hbb://')) continue;
+      upsert.run(nanoid(), e.url, e.title, e.visitCount, e.lastVisitAt, e.lastVisitAt);
+      const row = selectId.get(e.url) as { id: string };
+      insertVisit.run(nanoid(), row.id, e.lastVisitAt);
+      merged += 1;
+    }
+  });
+  tx();
+  return merged;
+}
+
 export function updateLatestTitle(url: string, title: string): void {
   if (!title) return;
   getDb().prepare(`UPDATE urls SET title = ? WHERE url = ?`).run(title, url);

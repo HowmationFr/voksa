@@ -444,6 +444,23 @@ export function installStreamMasker(host: MaskerHost): void {
     }
   }
 
+  /**
+   * A document whose visible content is painted by a PLUGIN (Chromium's PDF
+   * viewer), not by DOM nodes. The sweep can only reach the viewer's shell;
+   * an email inside the PDF itself is pixels this masker will never see, so
+   * the only honest behaviour under Stream Mode is to keep the whole document
+   * shrouded: fail closed, an invisible page, never a leak. Decided on the
+   * committed MIME type, not the URL: query strings and extension-less links
+   * lie about what they serve, `document.contentType` does not.
+   */
+  function isUnmaskableDocument(): boolean {
+    try {
+      return document.contentType === 'application/pdf';
+    } catch {
+      return false;
+    }
+  }
+
   // --- config transitions ----------------------------------------------------
   function onConfig(next: StreamModeConfig): void {
     const wasEnabled = active();
@@ -460,11 +477,18 @@ export function installStreamMasker(host: MaskerHost): void {
       host.beginProtected();
       fullSweep();
       installWebRTCStub();
-      host.endProtected();
+      // An unmaskable document keeps its shroud for as long as masking is on
+      // (this branch also runs on config CHANGES while enabled: skipping the
+      // lift here is what keeps it held across them).
+      if (!isUnmaskableDocument()) host.endProtected();
     } else if (wasEnabled) {
       restoreAll();
       removeWebRTCStub();
       ungateAllFrames();
+      // The shroud held over an unmaskable document is lifted only here.
+      // endProtected is idempotent (a normal page already lifted at boot);
+      // the guard keeps the disable path byte-identical for normal pages.
+      if (isUnmaskableDocument()) host.endProtected();
     }
   }
 
@@ -494,7 +518,10 @@ export function installStreamMasker(host: MaskerHost): void {
       fullSweep();
       installWebRTCStub();
     }
-    if (didBegin) host.endProtected();
+    // Unmaskable document (PDF viewer) while masking is on: the shroud stays.
+    // The curtain over the navigation then runs out its fail-to-blank timeout
+    // rather than revealing plugin-painted content no sweep ever touched.
+    if (didBegin && !(active() && isUnmaskableDocument())) host.endProtected();
   };
 
   if (document.readyState === 'loading') {

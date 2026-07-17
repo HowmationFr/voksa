@@ -101,9 +101,12 @@ export class CurtainController {
       }
     }
 
-    this.overlay.acquire(this.overlayKey(tabId));
-    await this.waitForAck(tabId, token, dataURL);
-
+    // Register the record BEFORE awaiting the UI ack. Previously it was set
+    // only after the ack, which left a window where a concurrent drop() (a
+    // panic double-press, a fast re-navigation) found no record, no-oped, and
+    // the curtain hung until the 6s fail-to-blank. isActive/onReady during the
+    // wait are correct with the record present (the tab IS curtained), and the
+    // caller only issues its load after this resolves, so no ready races in.
     const prev = this.records.get(tabId);
     if (prev) clearTimeout(prev.safetyTimer);
     this.records.set(tabId, {
@@ -111,6 +114,8 @@ export class CurtainController {
       expectedNonce: null,
       safetyTimer: setTimeout(() => this.clear(tabId, token), SAFETY_TIMEOUT_MS),
     });
+    this.overlay.acquire(this.overlayKey(tabId));
+    await this.waitForAck(tabId, token, dataURL);
   }
 
   /** A new document started in this tab: pair the pending curtain to it. */

@@ -11,6 +11,16 @@ export type PermissionDeps = {
   getStreamConfig: () => StreamModeConfig;
   /** chromeView / internal pages are always allowed (their own clipboard etc.). */
   isChromeContents: (wc: WebContents | null) => boolean;
+  /**
+   * DMCA stage 2: true when this webContents is a tab the user routed to a
+   * chosen audio output. Such a tab needs (a) the 'media' CHECK to pass so
+   * enumerateDevices exposes device labels/ids (Chromium gates both on it),
+   * and (b) 'speaker-selection' so setSinkId is honored. The consent is the
+   * user's explicit pick in OUR tab menu; prompting the page-level dialog on
+   * top of it would be two questions for one gesture. This never grants a
+   * media REQUEST (getUserMedia capture keeps its normal prompt/deny path).
+   */
+  isAudioRouted: (wc: WebContents | null) => boolean;
   getRemembered: (origin: string, permission: string) => PermissionDecision | undefined;
   remember: (origin: string, permission: string, decision: PermissionDecision) => void;
   /**
@@ -27,8 +37,14 @@ export type PermissionDeps = {
 // hid/serial/usb only ever reach the check handler; 'bluetooth' is in neither
 // Electron union today and would fall to default-deny anyway. Exported so
 // tests can pin the decision matrix.
+//
+// 'display-capture' is NOT in this list (it was, before the Capture
+// Handshake): the permission only lets a getDisplayMedia request REACH the
+// display-media picker, where the real consent lives (a user click on one
+// specific source, in OUR ui) and where Voksa surfaces are masked before the
+// first frame is delivered. Hard-denying it here killed the core use case:
+// sharing a window in Meet WHILE Stream Mode is on.
 export const STREAM_HARD_DENY = new Set([
-  'display-capture',
   'notifications',
   'clipboard-read',
   'idle-detection',
@@ -58,6 +74,26 @@ export function installPermissionHandlers(session: Session, deps: PermissionDeps
   session.setPermissionRequestHandler((wc, permission, callback, details) => {
     // The chrome UI (and internal pages) are trusted.
     if (deps.isChromeContents(wc)) {
+      callback(true);
+      return;
+    }
+
+    // Screen sharing: granted at THIS layer in both stream states, because
+    // this grant only forwards the request to the display-media picker
+    // (Capture Handshake). Consent is the user's click on one source there;
+    // an extra permission prompt before the picker would be two dialogs for
+    // one question (Chrome prompts nothing here either).
+    if (permission === 'display-capture') {
+      callback(true);
+      return;
+    }
+
+    // Audio-routed tab (DMCA stage 2): setSinkId may surface as a
+    // 'speaker-selection' request. The user already consented by picking the
+    // device in our menu; this must hold under Stream Mode too (routing under
+    // stream is the point). Scoped to the routed tab only: everywhere else
+    // 'speaker-selection' keeps its hard-deny / prompt path.
+    if (permission === 'speaker-selection' && deps.isAudioRouted(wc)) {
       callback(true);
       return;
     }
@@ -114,8 +150,33 @@ export function installPermissionHandlers(session: Session, deps: PermissionDeps
       .catch(() => callback(false));
   });
 
-  session.setPermissionCheckHandler((wc, permission, origin) => {
+  session.setPermissionCheckHandler((wc, permission, origin, details) => {
     if (deps.isChromeContents(wc)) return true;
+    // NB: 'display-capture' is handled only in the REQUEST handler above (it is
+    // not in Electron's check-handler permission union): getDisplayMedia goes
+    // through the request path, where the picker provides consent.
+    //
+    // Audio-routed tab: the 'media' check gates enumerateDevices label/id
+    // exposure, without which no frame could ever resolve the chosen label
+    // (worst under Stream Mode, where the default denyCamera/denyMicrophone
+    // would blank the check). Narrowed by details.mediaType: Chromium checks
+    // label exposure PER DEVICE KIND, and routing only ever needs the audio
+    // kinds; letting 'video' through would expose webcam labels (and make
+    // permissions.query({name:'camera'}) read granted) on origins that never
+    // earned it. A CHECK is capability reporting, never a capture grant:
+    // getUserMedia still flows through the request handler above, stream
+    // denies included. 'speaker-selection' needs no twin here: like
+    // display-capture, it is not in Electron's check-handler union (request
+    // path only). Cost, owned: the routed tab's origins can read AUDIO device
+    // labels (fingerprint surface), paid only on tabs the user explicitly
+    // routed.
+    if (
+      permission === 'media' &&
+      (details as { mediaType?: string } | undefined)?.mediaType !== 'video' &&
+      deps.isAudioRouted(wc)
+    ) {
+      return true;
+    }
     const cfg = deps.getStreamConfig();
     if (cfg.enabled) {
       if (permission === 'media') return !(cfg.denyCamera || cfg.denyMicrophone);

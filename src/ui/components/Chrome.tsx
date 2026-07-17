@@ -9,6 +9,9 @@ import { ErrorPage } from './pages/ErrorPage';
 import { PageContextMenu } from './PageContextMenu';
 import { PrintDialog } from './PrintDialog';
 import { PermissionPrompt } from './PermissionPrompt';
+import { AuthDialog } from './AuthDialog';
+import { CapturePicker } from './CapturePicker';
+import { SoundSignals } from './SoundSignals';
 import type { PageMenuPayload } from '../../shared/types';
 import { ConfirmDialogHost } from './ui/ConfirmDialog';
 import { voksa } from '../lib/bridge';
@@ -37,10 +40,13 @@ export function Chrome(): React.ReactElement {
   const toolbarRef = useRef<HTMLDivElement>(null);
   const showBookmarkBar = useSettingsStore((s) => s.settings.showBookmarkBar);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [tabMenuOpen, setTabMenuOpen] = useState(false);
   const [bookmarkOverlayCount, setBookmarkOverlayCount] = useState(0);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [siteSettingsOpen, setSiteSettingsOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [captureOpen, setCaptureOpen] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
   const [focusAddressSignal, setFocusAddressSignal] = useState(0);
   const [bookmarkSignal, setBookmarkSignal] = useState(0);
@@ -72,10 +78,13 @@ export function Chrome(): React.ReactElement {
 
   const anyOverlayOpen =
     menuOpen ||
+    tabMenuOpen ||
     bookmarkOverlayCount > 0 ||
     suggestionsOpen ||
     siteSettingsOpen ||
     permissionOpen ||
+    authOpen ||
+    captureOpen ||
     pageMenu !== null ||
     printTabId !== null;
   const chromeExpanded = anyOverlayOpen || internalSlug !== null || activeError !== null;
@@ -138,7 +147,7 @@ export function Chrome(): React.ReactElement {
         <div className="pointer-events-none absolute inset-x-0 top-0 z-20 h-[3px] bg-gradient-to-r from-stream/70 via-stream to-stream/70" />
       )}
       <div ref={toolbarRef} className="flex-shrink-0 bg-bg border-b border-border">
-        <TabBar />
+        <TabBar onMenuOpenChange={setTabMenuOpen} />
         <Toolbar
           onOpenMenu={() => setMenuOpen(true)}
           onSuggestionsVisibleChange={setSuggestionsOpen}
@@ -198,6 +207,9 @@ export function Chrome(): React.ReactElement {
       )}
       {printTabId && <PrintDialog tabId={printTabId} onClose={() => setPrintTabId(null)} />}
       <PermissionPrompt onOpenChange={setPermissionOpen} />
+      <AuthDialog onOpenChange={setAuthOpen} />
+      <CapturePicker onOpenChange={setCaptureOpen} />
+      <SoundSignals />
       <ConfirmDialogHost />
     </div>
   );

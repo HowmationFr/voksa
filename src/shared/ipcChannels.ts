@@ -14,6 +14,9 @@ export const IPC = {
   TAB_SET_CHROME_BOUNDS: 'tab:setChromeBounds',
   TAB_REOPEN_CLOSED: 'tab:reopenClosed',
   TAB_MUTE: 'tab:mute',
+  TAB_SET_PINNED: 'tab:setPinned',
+  // DMCA Audio Guard: lift a guard-mute for this tab's lifetime (the chip).
+  TAB_ALLOW_STREAM_AUDIO: 'tab:allowStreamAudio',
   TAB_DUPLICATE: 'tab:duplicate',
   /** Memory Saver: free this tab's renderer (it reloads when selected again). */
   TAB_DISCARD: 'tab:discard',
@@ -89,6 +92,18 @@ export const IPC = {
   STREAM_GET_CONFIG_SYNC: 'stream:getConfigSync',
   STREAM_UPDATE_CONFIG: 'stream:updateConfig',
   STREAM_TOGGLE: 'stream:toggle',
+  // Panic: curtain + mute every window, arm the stream; second call restores.
+  // The system-wide hotkey is just another trigger of the same action.
+  STREAM_PANIC: 'stream:panic',
+  // Capture Handshake: main pushes the screen-share picker to the chrome UI,
+  // the UI answers with the chosen source id (or null = cancelled).
+  CAPTURE_PICKER_SHOW: 'stream:capturePickerShow',
+  CAPTURE_PICKER_PICK: 'stream:capturePickerPick',
+  // Debug-only (smoke): drive the handshake without Chromium's getDisplayMedia,
+  // which does not route to setDisplayMediaRequestHandler under CDP.
+  CAPTURE_SIMULATE: 'stream:captureSimulate',
+  // Go-Live Preflight: scan Voksa's tabs for what a viewer could catch.
+  PREFLIGHT_RUN: 'stream:preflightRun',
   STREAM_CONFIG_CHANGED: 'stream:configChanged',
   STREAM_DOC_START: 'stream:docStart',
   STREAM_READY: 'stream:ready',
@@ -103,6 +118,16 @@ export const IPC = {
   STREAM_FRAME_GATE: 'stream:frameGate',
   STREAM_FRAMES_STATUS: 'stream:framesStatus',
 
+  // Per-tab audio output routing (DMCA Audio Guard stage 2). The route is a
+  // device LABEL (deviceIds are origin-hashed, see shared/audioRouting.ts):
+  // SET stores it on the tab, APPLY pushes it to every frame, GET_SYNC lets a
+  // new document re-arm at document-start, STATUS carries the main frame's
+  // resolve verdict (matched:false clears the route: fail-visible).
+  AUDIO_ROUTE_SET: 'audioRoute:set',
+  AUDIO_ROUTE_APPLY: 'audioRoute:apply',
+  AUDIO_ROUTE_GET_SYNC: 'audioRoute:getSync',
+  AUDIO_ROUTE_STATUS: 'audioRoute:status',
+
   // Permissions (Stream Mode OFF → prompt)
   PERMISSION_REQUEST: 'permission:request',
   PERMISSION_RESPOND: 'permission:respond',
@@ -116,7 +141,16 @@ export const IPC = {
   EXTENSIONS_REORDER: 'extensions:reorder',
   EXTENSIONS_CHANGED: 'extensions:changed',
 
+  // Browser-data import (Chrome/Firefox: bookmarks + history, never passwords)
+  IMPORT_SOURCES: 'import:sources',
+  IMPORT_RUN: 'import:run',
+
   // App
+  // Default browser: state (is Voksa the http/https handler?) and the request
+  // to become it (macOS/Linux: direct; Windows: opens ms-settings, the OS
+  // does not allow a programmatic claim).
+  APP_DEFAULT_BROWSER_STATE: 'app:defaultBrowserState',
+  APP_SET_DEFAULT_BROWSER: 'app:setDefaultBrowser',
   APP_OPEN_DEVTOOLS: 'app:openDevtools',
   APP_GET_HOSTNAME: 'app:getHostname',
   APP_OPEN_EXTERNAL: 'app:openExternal',
@@ -130,6 +164,15 @@ export const IPC = {
   WINDOW_CLOSE: 'window:close',
   WINDOW_STATE: 'window:state',
   WINDOW_STATE_CHANGED: 'window:stateChanged',
+
+  // HTTP authentication (Basic/Digest/proxy): main pushes a credential
+  // request to the owning window's chrome UI, the dialog answers back.
+  AUTH_REQUEST: 'auth:request',
+  AUTH_RESPOND: 'auth:respond',
+
+  // TLS interstitial: proceed past a certificate error for the failed tab's
+  // host (session-scoped exception, never persisted).
+  TAB_TLS_PROCEED: 'tabs:tlsProceed',
 
   // Stream Mode curtain (prevents background flash during navigation)
   CURTAIN_SET: 'curtain:set',

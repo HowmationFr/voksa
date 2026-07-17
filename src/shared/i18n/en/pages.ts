@@ -86,6 +86,16 @@ export const enPages: Record<string, string> = {
   'Réessayer': 'Retry',
   'Code {code}': 'Code {code}',
 
+  // ErrorPage: TLS interstitial
+  'Votre connexion n’est pas privée': 'Your connection is not private',
+  'Le certificat de sécurité de {host} n’est pas approuvé. Quelqu’un pourrait tenter d’intercepter ce que vous voyez ou saisissez.':
+    'The security certificate of {host} is not trusted. Someone could be trying to intercept what you see or type.',
+  'Revenir en sécurité': 'Back to safety',
+  'Paramètres avancés': 'Advanced',
+  'Si vous comprenez le risque, vous pouvez continuer : l’exception ne vaut que pour ce certificat précis et sera oubliée à la fermeture de Voksa.':
+    'If you understand the risk you can proceed: the exception applies to this exact certificate only and is forgotten when Voksa closes.',
+  'Continuer vers {host} (non sécurisé)': 'Proceed to {host} (unsafe)',
+
   // voksa://search
   'Moteurs de recherche': 'Search engines',
   'Tapez le mot-clé d’un moteur dans la barre d’adresse, puis Espace, pour chercher directement dessus sans changer votre moteur par défaut.':

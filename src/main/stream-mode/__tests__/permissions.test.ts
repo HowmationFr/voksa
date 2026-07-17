@@ -16,12 +16,21 @@ type RequestHandler = (
   callback: (granted: boolean) => void,
   details?: RequestDetails,
 ) => void;
-type CheckHandler = (wc: WebContents | null, permission: string, origin?: string) => boolean;
+type CheckDetails = { mediaType?: 'video' | 'audio' | 'unknown' };
+type CheckHandler = (
+  wc: WebContents | null,
+  permission: string,
+  origin?: string,
+  details?: CheckDetails,
+) => boolean;
 
 // Mirrors of the module's exported lists (pinned equal by a test below): a
 // drift here IS a decision-matrix change and must be reviewed as one.
+// 2026-07 (Capture Handshake): 'display-capture' left this list. The
+// permission now only forwards the request to the display-media picker,
+// which is where the real consent (a click on ONE source) and the masking
+// guarantee live. See the dedicated tests below.
 const STREAM_HARD_DENY = [
-  'display-capture',
   'notifications',
   'clipboard-read',
   'idle-detection',
@@ -47,6 +56,8 @@ const REQUEST_PATH_HARD_DENY = STREAM_HARD_DENY.filter(
 
 /** Sentinel standing in for the chromeView webContents (compared by identity). */
 const CHROME_WC = { id: 999 } as unknown as WebContents;
+/** Sentinel for a tab the user routed to a chosen audio output (DMCA stage 2). */
+const ROUTED_WC = { id: 777 } as unknown as WebContents;
 
 const ORIGIN = 'https://site.example';
 const PAGE_URL = `${ORIGIN}/some/page`;
@@ -89,6 +100,7 @@ function setup(
   installPermissionHandlers(session, {
     getStreamConfig: () => config,
     isChromeContents: (wc) => wc === CHROME_WC,
+    isAudioRouted: (wc) => wc === ROUTED_WC,
     getRemembered: (origin, permission) => rememberedStore[origin]?.[permission],
     remember,
     promptUser,
@@ -107,8 +119,12 @@ function setup(
     );
     return probe;
   };
-  const check = (permission: string, origin: string = ORIGIN, wc: WebContents | null = null) =>
-    checkHandler!(wc, permission, origin);
+  const check = (
+    permission: string,
+    origin: string = ORIGIN,
+    wc: WebContents | null = null,
+    details?: CheckDetails,
+  ) => checkHandler!(wc, permission, origin, details);
 
   return { request, check, remember, promptUser };
 }
@@ -215,6 +231,59 @@ describe('installPermissionHandlers, Stream Mode ON', () => {
       expect(request(permission, { requestingUrl: PAGE_URL }).granted, permission).toBe(true);
       expect(check(permission), permission).toBe(true);
     }
+  });
+
+  it('forwards display-capture to the picker in BOTH stream states, without prompting', () => {
+    // The Capture Handshake moved the consent into the display-media picker:
+    // granting the PERMISSION only lets getDisplayMedia reach it. Hard-denying
+    // under stream killed the core use case (sharing a window in Meet WHILE
+    // streaming); prompting when off would be two dialogs for one question.
+    // getDisplayMedia flows through the REQUEST handler only; display-capture
+    // is not in Electron's check-handler union, so the check path is moot.
+    const on = setup({ config: { enabled: true } });
+    expect(on.request('display-capture', { requestingUrl: PAGE_URL }).granted).toBe(true);
+    expect(on.promptUser).not.toHaveBeenCalled();
+
+    const off = setup({ config: { enabled: false } });
+    expect(off.request('display-capture', { requestingUrl: PAGE_URL }).granted).toBe(true);
+    expect(off.promptUser).not.toHaveBeenCalled();
+  });
+
+  it('audio-routed tab (DMCA stage 2): labels + setSinkId pass, capture stays denied', () => {
+    // Worst case on purpose: stream ON with the default camera/microphone
+    // denies. The routed tab still needs the 'media' CHECK (enumerateDevices
+    // label/id exposure, without which no frame can resolve the chosen label)
+    // and 'speaker-selection' (setSinkId); getUserMedia capture must remain
+    // denied regardless: a routing gesture is not a capture consent.
+    const { request, check, promptUser } = setup({
+      config: { enabled: true, denyCamera: true, denyMicrophone: true },
+    });
+    expect(check('media', ORIGIN, ROUTED_WC)).toBe(true);
+    // Per device kind: the audio kinds pass (that is what routing resolves),
+    // the VIDEO kind falls through to the normal stream deny. Webcam labels
+    // are not part of what the user consented to by picking an audio output.
+    expect(check('media', ORIGIN, ROUTED_WC, { mediaType: 'audio' })).toBe(true);
+    expect(check('media', ORIGIN, ROUTED_WC, { mediaType: 'unknown' })).toBe(true);
+    expect(check('media', ORIGIN, ROUTED_WC, { mediaType: 'video' })).toBe(false);
+    // NB: no 'speaker-selection' CHECK counterpart: like display-capture, it
+    // is not in Electron's check-handler union (request path only).
+    expect(request('speaker-selection', { requestingUrl: PAGE_URL }, ROUTED_WC).granted).toBe(true);
+    expect(
+      request('media', { requestingUrl: PAGE_URL, mediaTypes: ['audio'] }, ROUTED_WC).granted,
+    ).toBe(false);
+    // A NON-routed tab keeps the hard-deny: the carve-out is per-tab, never global.
+    expect(check('media', ORIGIN)).toBe(false);
+    expect(check('speaker-selection', ORIGIN)).toBe(false);
+    expect(request('speaker-selection', { requestingUrl: PAGE_URL }).granted).toBe(false);
+    expect(promptUser).not.toHaveBeenCalled();
+  });
+
+  it('audio-routed tab, stream OFF: setSinkId is granted without a page-level prompt', () => {
+    // The consent already happened in OUR menu; a second dialog would be two
+    // questions for one gesture.
+    const { request, promptUser } = setup({ config: { enabled: false } });
+    expect(request('speaker-selection', { requestingUrl: PAGE_URL }, ROUTED_WC).granted).toBe(true);
+    expect(promptUser).not.toHaveBeenCalled();
   });
 
   it('always trusts the chrome UI webContents, even for hard-denied permissions', () => {

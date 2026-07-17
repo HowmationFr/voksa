@@ -2,6 +2,7 @@ import { WebContentsView } from 'electron';
 import { nanoid } from 'nanoid';
 import type { TabState, TabError } from '../../shared/types';
 import { recordVisit, updateLatestFavicon, updateLatestTitle } from '../storage/history';
+import { isPanicActive } from '../stream-mode/panicState';
 import { clearGoogleAuthFlow } from '../ua';
 
 const VOKSA_NEW_TAB = 'voksa://newtab';
@@ -106,7 +107,22 @@ export class Tab {
   isCrashed = false;
   isAudible = false;
   isMuted = false;
+  /** DMCA Audio Guard: guard-muted under Stream Mode (separate from isMuted). */
+  streamMuted = false;
+  /** The user clicked "allow on stream": the guard leaves this tab alone. */
+  streamAudioAllowed = false;
+  /**
+   * DMCA stage 2: the LABEL of the chosen audio output device, or null for
+   * the system default. A label, not a deviceId: ids are hashed per origin,
+   * so each frame re-resolves the label itself (shared/audioRouting.ts).
+   * Survives a discard (it lives on the Tab, and the revived document re-asks
+   * through AUDIO_ROUTE_GET_SYNC at document-start). Not persisted to the
+   * session: a device set is machine-and-moment specific.
+   */
+  audioRouteLabel: string | null = null;
   isInternal = false;
+  /** Pinned tabs live in the left cluster and are never auto-discarded. */
+  pinned = false;
   isDiscarded = false;
   zoomPercent = 100;
   error: TabError | null = null;
@@ -183,6 +199,10 @@ export class Tab {
         sandbox: true,
         webSecurity: true,
         backgroundThrottling: true,
+        // Chromium's built-in PDF viewer is a "plugin": without this, every
+        // PDF link becomes a download instead of rendering in the tab. The
+        // chromeView already sets it (print preview); tabs were the gap.
+        plugins: true,
       },
     });
 
@@ -192,15 +212,10 @@ export class Tab {
     // Stream Mode curtain / shroud; this just picks a sane blank colour.
     this.view.setBackgroundColor('#00000000');
     // Mute lives on the webContents, so a revive builds one that is UNMUTED
-    // while the tab strip still shows the speaker crossed out: carry it over.
-    // (Zoom needs no such care: it is re-applied per host on did-finish-load.)
-    if (this.isMuted) {
-      try {
-        this.view.webContents.setAudioMuted(true);
-      } catch {
-        // ignore
-      }
-    }
+    // while the tab strip still shows the speaker crossed out: re-apply the
+    // full audio state (user mute, guard mute, panic) through the single
+    // writer. (Zoom needs no such care: re-applied per host on did-finish-load.)
+    this.applyAudioMuted();
     this.isDiscarded = false;
 
     this.wireEvents();
@@ -344,7 +359,10 @@ export class Tab {
       isActive,
       isAudible: this.isAudible,
       isMuted: this.isMuted,
+      streamMuted: this.streamMuted,
+      audioRoute: this.audioRouteLabel,
       isInternal: this.isInternal,
+      pinned: this.pinned,
       isDiscarded: this.isDiscarded,
       zoomPercent: this.zoomPercent,
       error: this.error,
@@ -352,10 +370,27 @@ export class Tab {
   }
 
   setMuted(muted: boolean): void {
+    this.isMuted = muted;
+    this.applyAudioMuted();
+    this.emit('state-changed');
+  }
+
+  /** DMCA Audio Guard flag (see shared/audioGuard.ts). Never touches isMuted. */
+  setStreamMuted(muted: boolean): void {
+    if (this.streamMuted === muted) return;
+    this.streamMuted = muted;
+    this.applyAudioMuted();
+    this.emit('state-changed');
+  }
+
+  /**
+   * The single writer of the physical mute: the OR of the user's mute, the
+   * guard's mute, and the global panic (which must win over any state
+   * re-application that happens while it is up).
+   */
+  applyAudioMuted(): void {
     try {
-      this.wc?.setAudioMuted(muted);
-      this.isMuted = muted;
-      this.emit('state-changed');
+      this.wc?.setAudioMuted(isPanicActive() || this.isMuted || this.streamMuted);
     } catch {
       // ignore
     }

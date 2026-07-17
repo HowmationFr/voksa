@@ -135,4 +135,50 @@ export const enStream: Record<string, string> = {
   'Les changements s’appliquent à la prochaine demande du site':
     'Changes apply to the next request from the site',
   'Recharger': 'Reload',
+
+  // Go-Live Preflight card
+  'Vérification avant live': 'Go-live check',
+  'Un audit en un clic de ce qu’un spectateur pourrait apercevoir dans Voksa avant de lancer le direct.':
+    'A one-click audit of what a viewer could catch in Voksa before you go live.',
+  'L’audit couvre les onglets de Voksa. Il ne voit pas Discord, les notifications système ni le reste de l’écran.':
+    'The audit covers Voksa tabs. It cannot see Discord, system notifications or the rest of your screen.',
+  'Lancer la vérification': 'Run the check',
+  'Analyse…': 'Scanning…',
+  'Rien à signaler sur {n} onglets.': 'Nothing to flag across {n} tabs.',
+  'Son en arrière-plan : {label}': 'Background sound: {label}',
+  'Donnée sensible : {label}': 'Sensitive data: {label}',
+  'Fermer l’onglet': 'Close tab',
+
+  // Panic Key card
+  'Bouton panique': 'Panic button',
+  'Un raccourci SYSTÈME qui masque toutes les fenêtres et coupe tout le son, même quand OBS ou le jeu a le focus.':
+    'A SYSTEM-WIDE shortcut that curtains every window and cuts all sound, even while OBS or the game has focus.',
+  'Rideau sur toutes les fenêtres + son coupé + Mode Stream armé. Second appui : tout revient (le Mode Stream reste armé).':
+    'Curtain over every window + sound cut + Stream Mode armed. Second press: everything comes back (Stream Mode stays armed).',
+  'Le raccourci n’est actif que pendant que le Mode Stream est armé.':
+    'The shortcut is only active while Stream Mode is armed.',
+  'Cliquer puis appuyer sur le nouveau raccourci': 'Click, then press the new shortcut',
+  'Appuyez sur un raccourci…': 'Press a shortcut…',
+
+  // Audio routing card (DMCA stage 2)
+  'Audio par onglet': 'Per-tab audio',
+  'Sous Mode Stream, un onglet d’arrière-plan qui se met à jouer du son est coupé automatiquement ; la puce sur l’onglet le réautorise.':
+    'Under Stream Mode, a background tab that starts playing sound is muted automatically; the chip on the tab allows it again.',
+  'Envoyez le son d’un onglet vers une autre sortie : clic droit sur l’onglet, « Sortie audio », choisissez votre casque. OBS, qui capte la sortie par défaut, n’entend plus cet onglet ; vous, si.':
+    'Send a tab’s sound to another output: right-click the tab, "Audio output", pick your headset. OBS, which captures the default output, no longer hears that tab; you still do.',
+  'Réduction de risque, pas une immunité : un lecteur intégré venant d’un autre site (iframe), une frame sans préchargement ou un flux DRM peut échapper au routage et rester sur la sortie système. Si le périphérique choisi disparaît, l’onglet revient sur la sortie système et le menu cesse de l’afficher : rien n’est prétendu couvert qui ne l’est pas.':
+    'Risk reduction, not immunity: an embedded player from another site (iframe), a preload-less frame or a DRM stream can escape the routing and stay on the system output. If the chosen device disappears, the tab falls back to the system output and the menu stops claiming it: nothing is pretended covered that is not.',
+
+  // Sound Signals card
+  'Signaux sonores': 'Sound signals',
+  'Des repères audio courts : vous ENTENDEZ l’état changer sans quitter OBS des yeux. OBS capte ces sons, comme les bips de Discord.':
+    'Short audio cues: you HEAR the state change without looking away from OBS. OBS captures these sounds, like Discord beeps.',
+  'Mode Stream armé / désarmé': 'Stream Mode armed / disarmed',
+  'Deux notes montantes à l’armement, descendantes au retrait.':
+    'Two rising notes when arming, falling when disarming.',
+  'Téléchargement terminé': 'Download finished',
+  'Un bip discret quand un fichier arrive.': 'A discreet beep when a file lands.',
+  'Mise à jour prête': 'Update ready',
+  'Un bip quand une nouvelle version attend le redémarrage.':
+    'A beep when a new version awaits the restart.',
 };

@@ -4,8 +4,10 @@ import {
   CheckCircle2,
   ChevronRight,
   ExternalLink,
+  FolderInput,
   Gauge,
   Github,
+  Globe,
   Info,
   Monitor,
   Moon,
@@ -175,6 +177,26 @@ export function SettingsPage(): React.ReactElement {
           ),
         },
       ],
+    },
+    {
+      // Chrome gives the default browser its own section; one card, but it is
+      // the single most identity-defining setting a browser has.
+      id: 'defaultBrowser',
+      title: t('Navigateur par défaut'),
+      icon: Globe,
+      rows: [],
+      cardKeywords: `${t('Définir par défaut')} default browser navigateur defaut http https os`,
+      card: <DefaultBrowserCard />,
+    },
+    {
+      // A switcher looks for this within the first ten minutes; it gets its
+      // own sidebar entry so searching "import" or "chrome" always lands.
+      id: 'import',
+      title: t('Importer'),
+      icon: FolderInput,
+      rows: [],
+      cardKeywords: `${t('Importer les favoris et l’historique')} import chrome firefox migration donnees`,
+      card: <ImportCard />,
     },
     {
       id: 'search',
@@ -936,6 +958,224 @@ function ExceptionsEditor({
  * state through the shared store (the toolbar dot and the burger menu read the
  * same one) and triggers check/install.
  */
+/**
+ * Default-browser status and the request to become it. The OS is the single
+ * source of truth: the card re-queries on every window focus, because the
+ * Windows flow necessarily leaves the app (ms-settings) and comes back, and
+ * nothing else would refresh the answer.
+ */
+function DefaultBrowserCard(): React.ReactElement {
+  const t = useT();
+  const [state, setState] = useState<{ packaged: boolean; isDefault: boolean } | null>(null);
+  const isWindows = typeof navigator !== 'undefined' && /Win/i.test(navigator.platform);
+
+  useEffect(() => {
+    let alive = true;
+    const refresh = () => {
+      void voksa.app.defaultBrowserState().then((s) => {
+        if (alive) setState(s);
+      });
+    };
+    refresh();
+    window.addEventListener('focus', refresh);
+    return () => {
+      alive = false;
+      window.removeEventListener('focus', refresh);
+    };
+  }, []);
+
+  const makeDefault = () => {
+    void voksa.app.setDefaultBrowser().then(setState);
+  };
+
+  return (
+    <div className="bg-bg-elevated border border-border rounded-xl p-4 flex items-center gap-4">
+      {state?.isDefault ? (
+        <>
+          <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-accent-muted flex items-center justify-center text-accent">
+            <CheckCircle2 size={18} />
+          </div>
+          <div className="flex-1 min-w-0 text-sm text-fg">
+            {t('Voksa est votre navigateur par défaut.')}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-bg-hover flex items-center justify-center text-fg-muted">
+            <Globe size={18} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm text-fg">
+              {t('Voksa n’est pas votre navigateur par défaut.')}
+            </div>
+            <div className="mt-0.5 text-[12px] text-fg-subtle">
+              {state && !state.packaged
+                ? t('Indisponible en développement : seul le build installé peut être choisi par le système.')
+                : isWindows
+                  ? t('Windows va ouvrir les Réglages : choisissez Voksa dans « Navigateur web ».')
+                  : t('Les liens ouverts par les autres applications s’ouvriront dans Voksa.')}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={makeDefault}
+            disabled={!state || !state.packaged}
+            className="flex-shrink-0 px-3 h-9 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {t('Définir par défaut')}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+type ImportSourceUi = {
+  id: string;
+  browser: 'chrome' | 'firefox';
+  profileName: string;
+  profileDir: string;
+  hasBookmarks: boolean;
+  hasHistory: boolean;
+};
+
+/**
+ * Import bookmarks + history from an installed Chrome/Firefox profile.
+ * Passwords are named explicitly as NOT imported: silence would read as an
+ * oversight, and quietly decrypting another browser's vault is what malware
+ * does, not what a browser does.
+ */
+function ImportCard(): React.ReactElement {
+  const t = useT();
+  const [sources, setSources] = useState<ImportSourceUi[] | null>(null);
+  const [sourceId, setSourceId] = useState('');
+  const [wantBookmarks, setWantBookmarks] = useState(true);
+  const [wantHistory, setWantHistory] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    void voksa.importData.sources().then((list) => {
+      setSources(list);
+      if (list.length > 0) setSourceId(list[0].id);
+    });
+  }, []);
+
+  const selected = sources?.find((s) => s.id === sourceId) ?? null;
+  const browserLabel = (b: 'chrome' | 'firefox') => (b === 'chrome' ? 'Google Chrome' : 'Mozilla Firefox');
+
+  const run = () => {
+    if (!selected || busy) return;
+    setBusy(true);
+    setMessage(null);
+    void voksa.importData
+      .run({
+        sourceId: selected.id,
+        bookmarks: wantBookmarks && selected.hasBookmarks,
+        history: wantHistory && selected.hasHistory,
+      })
+      .then((result) => {
+        if (result.ok) {
+          const parts: string[] = [];
+          if (wantBookmarks) {
+            parts.push(
+              t('{n} favoris importés ({skipped} déjà présents)', {
+                n: result.bookmarksImported,
+                skipped: result.bookmarksSkipped,
+              }),
+            );
+          }
+          if (wantHistory) {
+            parts.push(t('{n} pages d’historique importées', { n: result.historyImported }));
+          }
+          setMessage(parts.join(' · '));
+        } else if (result.error === 'locked') {
+          setMessage(t('La base est verrouillée : fermez l’autre navigateur puis réessayez.'));
+        } else if (result.error === 'nothing-selected') {
+          setMessage(t('Rien à importer : cochez au moins un type de données.'));
+        } else {
+          setMessage(t('L’import a échoué : le profil est illisible ou a disparu.'));
+        }
+      })
+      .finally(() => setBusy(false));
+  };
+
+  if (sources === null) {
+    return (
+      <div className="bg-bg-elevated border border-border rounded-xl p-4 text-sm text-fg-subtle">
+        {t('Recherche des navigateurs installés…')}
+      </div>
+    );
+  }
+  if (sources.length === 0) {
+    return (
+      <div className="bg-bg-elevated border border-border rounded-xl p-4 text-sm text-fg-muted">
+        {t('Aucun profil Chrome ou Firefox détecté sur cet ordinateur.')}
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-bg-elevated border border-border rounded-xl p-4 space-y-4" data-voksa-import>
+      <div>
+        <div className="text-sm font-medium text-fg mb-1.5">
+          {t('Importer les favoris et l’historique')}
+        </div>
+        <select
+          value={sourceId}
+          onChange={(e) => {
+            setSourceId(e.target.value);
+            setMessage(null);
+          }}
+          className="w-full bg-bg-inset border border-border rounded-lg px-3 h-9 text-sm"
+        >
+          {sources.map((s) => (
+            <option key={s.id} value={s.id}>
+              {browserLabel(s.browser)} : {s.profileName}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="flex items-center gap-6">
+        <label className="flex items-center gap-2 text-sm text-fg">
+          <input
+            type="checkbox"
+            checked={wantBookmarks && (selected?.hasBookmarks ?? false)}
+            disabled={!selected?.hasBookmarks}
+            onChange={(e) => setWantBookmarks(e.target.checked)}
+            className="accent-accent"
+          />
+          {t('Favoris')}
+        </label>
+        <label className="flex items-center gap-2 text-sm text-fg">
+          <input
+            type="checkbox"
+            checked={wantHistory && (selected?.hasHistory ?? false)}
+            disabled={!selected?.hasHistory}
+            onChange={(e) => setWantHistory(e.target.checked)}
+            className="accent-accent"
+          />
+          {t('Historique')}
+        </label>
+      </div>
+      <p className="text-[12px] text-fg-subtle">
+        {t('Les favoris arrivent dans un dossier dédié ; les doublons sont ignorés. Les mots de passe ne sont jamais importés.')}
+      </p>
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={run}
+          disabled={busy || (!wantBookmarks && !wantHistory)}
+          className="px-4 h-9 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {busy ? t('Import en cours…') : t('Importer')}
+        </button>
+        {message && <span className="text-[12px] text-fg-muted">{message}</span>}
+      </div>
+    </div>
+  );
+}
+
 function AboutCard(): React.ReactElement {
   const t = useT();
   const state = useUpdatesStore((s) => s.state);

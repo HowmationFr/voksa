@@ -9,6 +9,19 @@ export type TabError = {
   url: string;
 };
 
+/**
+ * An HTTP authentication challenge (Basic/Digest/proxy) pushed by the main
+ * process to the owning window's chrome UI. Answered via AUTH_RESPOND;
+ * credentials are relayed straight to Chromium's callback, never persisted.
+ */
+export type AuthRequest = {
+  id: string;
+  /** host:port of the server (or proxy) asking for credentials. */
+  host: string;
+  realm: string;
+  isProxy: boolean;
+};
+
 export type TabState = {
   id: string;
   /**
@@ -28,7 +41,27 @@ export type TabState = {
   isActive: boolean;
   isAudible: boolean;
   isMuted: boolean;
+  /**
+   * DMCA Audio Guard: muted by Stream Mode because this background tab became
+   * audible. Separate from isMuted (the user's own toggle) so turning the
+   * stream off restores the exact pre-stream audio state. The chip on the tab
+   * lifts it (explicit allow); activation does not.
+   */
+  streamMuted: boolean;
+  /**
+   * DMCA stage 2: the LABEL of the audio output device this tab's sound is
+   * routed to, null = system default. A label because deviceIds are hashed
+   * per origin (shared/audioRouting.ts); cleared by main when it no longer
+   * resolves, so the UI never claims a routing that is not applied.
+   */
+  audioRoute: string | null;
   isInternal: boolean;
+  /**
+   * Pinned tabs sit in a fixed cluster at the left of the strip: favicon
+   * only, no close button, Ctrl+W is a no-op on them, and the Memory Saver
+   * never puts them to sleep.
+   */
+  pinned: boolean;
   /**
    * Memory Saver: the tab has NO webContents at all, its renderer was freed.
    * It keeps its url/title/history and comes back when the user selects it.
@@ -223,6 +256,22 @@ export type AppSettings = {
    * prerender API at all.
    */
   preconnect: boolean;
+  /**
+   * Panic Key: a SYSTEM-WIDE shortcut (works while OBS or a game has focus)
+   * that curtains every window and mutes everything; second press restores.
+   * Registered only while Stream Mode is armed (see stream-mode/panic.ts).
+   */
+  panicKeyEnabled: boolean;
+  /** Electron accelerator string for the panic shortcut. */
+  panicKey: string;
+  /** Audio cues played by the chrome UI (WebAudio, no assets). */
+  soundCues: {
+    /** Stream Mode armed / disarmed (the one cue on by default: you HEAR the
+     * mask go up or down without looking away from OBS). */
+    streamToggle: boolean;
+    downloadDone: boolean;
+    updateReady: boolean;
+  };
 };
 
 export type ExtensionInfo = {

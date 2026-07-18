@@ -37,3 +37,9 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      # All CI action bumps ride ONE PR: three separate action PRs are three
+      # links of an update-branch cascade under the strict up-to-date rule.
+      actions:
+        patterns:
+          - "*"

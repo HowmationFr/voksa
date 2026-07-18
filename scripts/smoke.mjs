@@ -192,8 +192,15 @@ async function assertPortFree() {
 
 function spawnElectron() {
   const args = ['electron', 'debug-profile.cjs'];
-  // Chromium's setuid sandbox is unavailable on CI runners.
-  if (process.env.CI) args.push('--no-sandbox');
+  // NO --no-sandbox, EVER (it used to be passed on CI): without the sandbox,
+  // Electron never attaches service-worker preload realms, so every
+  // extension API the runtime injects into MV3 workers vanishes and their
+  // service workers die at module evaluation. Lived: the extension contract
+  // scenario was red on all three CI OSes while green locally, and the flag
+  // was the only difference. Its original reason was Linux-only anyway
+  // (Ubuntu 24 restricts unprivileged user namespaces): ci.yml now lifts
+  // that restriction with a sysctl instead, so the sandbox, and with it the
+  // production behaviour, is what gets tested.
   child = spawn('npx', args, {
     cwd: root,
     env,

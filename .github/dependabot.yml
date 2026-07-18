@@ -20,7 +20,14 @@ updates:
     open-pull-requests-limit: 10
     ignore:
       - dependency-name: electron-chrome-extensions
-      - dependency-name: electron
+      # MAJORS ARE OURS. A major version is a planned migration (Electron 43,
+      # React 19, Tailwind 4...), decided and scheduled by a human, never
+      # inbound mail. Security fixes travel as patch/minor and keep flowing;
+      # a fix that only exists in a new major still raises the CVE alert
+      # (alerts are independent of update PRs). This also ends the hydra
+      # effect: ignoring one major just makes Dependabot propose the next
+      # one down.
+      - dependency-name: "*"
         update-types: ["version-update:semver-major"]
     groups:
       # One weekly-ish PR for routine bumps; electron stays in its own PR so

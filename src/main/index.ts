@@ -23,6 +23,7 @@ import {
 } from './windows';
 import { closeDb } from './storage/db';
 import { flushSettings, getSettings } from './storage/settings';
+import { resolveLanguage } from '../shared/i18n';
 import { pickStartupPlan } from '../shared/startup';
 import {
   loadSession,
@@ -66,6 +67,27 @@ getStreamMode();
 
 // CRITICAL for Google login: must run before app.whenReady().
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+
+// Chromium PROCESS locale, aligned on Voksa's language setting BEFORE ready:
+// extension pages resolve their _locales messages (and navigator.language)
+// from it, so without this uBO Lite & friends render in English on a French
+// system whatever our own UI shows. 'system' resolves exactly like the UI
+// does; the OS locale comes from Intl because app.getLocale() only answers
+// after 'ready'. A language change in settings reaches extensions at the
+// next launch (our own UI switches live).
+try {
+  // getPreferredSystemLanguages reads the OS list directly and answers
+  // before 'ready'; Intl's ICU default in the main process does NOT follow
+  // the OS at this point (observed: 'en' on a French Windows), and
+  // app.getLocale()/getSystemLocale() only answer after 'ready'.
+  const systemLocale =
+    app.getPreferredSystemLanguages()[0] ??
+    Intl.DateTimeFormat().resolvedOptions().locale ??
+    'en';
+  app.commandLine.appendSwitch('lang', resolveLanguage(getSettings().language, systemLocale));
+} catch {
+  // settings unreadable: keep Chromium's own locale detection
+}
 
 // Windows toasts are keyed by AppUserModelID. The NSIS installer writes one
 // into the shortcut, but a portable/unpacked run has none and every

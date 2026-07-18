@@ -600,7 +600,7 @@ function CustomMasksCard({
   };
 
   return (
-    <div className="bg-bg-elevated border border-border rounded-xl overflow-hidden">
+    <div className="bg-bg-elevated border border-border rounded-xl overflow-hidden mb-10">
       <div className="p-4 border-b border-border">
         <div className="flex items-center gap-2">
           <div className="relative flex-1">

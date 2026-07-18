@@ -33,6 +33,7 @@ import {
   clearCertExceptions,
   installNetGuards,
 } from '../netGuards';
+import { isDefaultBrowser } from '../defaultBrowser';
 import { detectSources, runImport, type ImportSelection } from '../import/importer';
 import { getPanic } from '../stream-mode/panic';
 import { getCaptureHandshake } from '../stream-mode/captureHandshake';
@@ -883,14 +884,13 @@ export function registerIpcHandlers(): void {
     },
   );
   // --- Default browser -------------------------------------------------------
-  // isDefaultProtocolClient asks the OS who owns http/https right now. Only
-  // meaningful packaged: in dev the registered binary would be electron.exe.
-  const defaultBrowserState = () => ({
+  // The truthful check lives in defaultBrowser.ts. On Windows it reads the
+  // UserChoice ProgId (what actually opens links on Windows 10+), NEVER
+  // app.isDefaultProtocolClient: that API checks the legacy registration the
+  // setter writes, so it answers yes to its own echo (lived, v0.5.0).
+  const defaultBrowserState = async () => ({
     packaged: app.isPackaged,
-    isDefault:
-      app.isPackaged &&
-      app.isDefaultProtocolClient('http') &&
-      app.isDefaultProtocolClient('https'),
+    isDefault: await isDefaultBrowser(),
   });
   ipcMain.handle(IPC.APP_DEFAULT_BROWSER_STATE, () => defaultBrowserState());
   ipcMain.handle(IPC.APP_SET_DEFAULT_BROWSER, async () => {

@@ -1,5 +1,5 @@
 diff --git a/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js b/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js
-index 67d3be4..22b1adf 100644
+index 67d3be4..d702890 100644
 --- a/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js
 +++ b/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js
 @@ -14,6 +14,10 @@
@@ -13,7 +13,68 @@ index 67d3be4..22b1adf 100644
    var addExtensionListener = (extensionId, name, callback) => {
      const listenerCount = listenerMap.get(name) || 0;
      if (listenerCount === 0) {
-@@ -449,12 +453,107 @@
+@@ -365,7 +369,59 @@
+           shouldInject: () => manifest.manifest_version === 3,
+           factory: (base) => {
+             if (base.getMessage) {
+-              return base;
++              // PATCH(voksa): Electron's native chrome.i18n.getMessage is
++              // stuck on the extension's default_locale (the browser-side
++              // message bundle ignores the app locale: observed fr UI
++              // language with English messages). Resolve the right
++              // _locales/<lang>/messages.json ourselves, and fall back to
++              // the native bundle for any missing key (partial translations
++              // must not lose their default-locale strings). The catalog
++              // fetch is async: a getMessage call racing it gets the native
++              // (default-locale) string, which is the pre-patch behaviour.
++              const state = { map: null };
++              const uiLang = (() => {
++                try {
++                  return base.getUILanguage() || "en";
++                } catch (e) {
++                  return "en";
++                }
++              })();
++              const candidates = [];
++              const push = (l) => {
++                if (l && !candidates.includes(l)) candidates.push(l);
++              };
++              push(uiLang.replace(/-/g, "_"));
++              push(uiLang.split(/[-_]/)[0]);
++              (async () => {
++                for (const cand of candidates) {
++                  try {
++                    const res = await fetch(`/_locales/${cand}/messages.json`);
++                    if (res.ok) {
++                      state.map = await res.json();
++                      return;
++                    }
++                  } catch (e) {
++                    // locale dir absent: try the next candidate
++                  }
++                }
++              })();
++              const localizedGetMessage = (messageName, substitutions) => {
++                const entry = state.map ? state.map[messageName] : null;
++                if (!entry || typeof entry.message !== "string" || messageName.startsWith("@@")) {
++                  return base.getMessage(messageName, substitutions);
++                }
++                let msg = entry.message;
++                if (entry.placeholders) {
++                  for (const ph of Object.keys(entry.placeholders)) {
++                    const content = entry.placeholders[ph] && entry.placeholders[ph].content || "";
++                    msg = msg.split("$" + ph.toUpperCase() + "$").join(content);
++                  }
++                }
++                const subs = substitutions == null ? [] : [].concat(substitutions);
++                msg = msg.replace(/\$(\d)/g, (m, i) => String(subs[Number(i) - 1] ?? ""));
++                return msg.replace(/\$\$/g, "$");
++              };
++              return { ...base, getMessage: localizedGetMessage };
+             }
+             return {
+               ...base,
+@@ -449,12 +505,107 @@
          },
          storage: {
            factory: (base) => {
@@ -123,33 +184,52 @@ index 67d3be4..22b1adf 100644
              };
            }
          },
-@@ -567,6 +666,34 @@
+@@ -555,6 +706,7 @@
+           }
+         }
+       };
++      const libDefinedKeys = [];
+       Object.keys(apiDefinitions).forEach((key) => {
+         const apiName = key;
+         const baseApi = chrome[apiName];
+@@ -565,8 +717,45 @@
+           enumerable: true,
+           configurable: true
          });
++        libDefinedKeys.push(apiName);
        });
        delete globalThis.electron;
 +      // PATCH(voksa): newer Chromium ships a native `browser` namespace alias
 +      // in extension contexts (pages AND service workers) that is a DISTINCT
 +      // object from `chrome`. Extensions increasingly prefer it (uBO Lite's
 +      // background does browser.permissions.onRemoved.addListener at module
-+      // evaluation and the whole service worker dies when it is bare). This
-+      // library only augments `chrome`, so every API it provides must be
-+      // mirrored onto `browser`. Additive only: a member the native browser
-+      // object already has is never overwritten.
++      // evaluation and the whole service worker dies when it is bare; its
++      // popup queries browser.tabs and finds Electron's bare native stub, so
++      // it renders without the current site and its settings button is dead).
++      // This library only augments `chrome`, so its surface must be mirrored
++      // onto `browser` with TWO granularities:
++      //  - every API the library DEFINED above replaces the browser one too,
++      //    exactly as it replaced the chrome one (the native stub it was
++      //    built from is strictly poorer than the replacement);
++      //  - everything else is additive only: a native browser member the
++      //    library did not touch is never overwritten.
 +      try {
 +        const browserNs = globalThis.browser;
 +        if (browserNs && browserNs !== chrome) {
-+          for (const key of Object.getOwnPropertyNames(chrome)) {
-+            if (browserNs[key] === void 0) {
-+              try {
-+                Object.defineProperty(browserNs, key, {
-+                  value: chrome[key],
-+                  enumerable: true,
-+                  configurable: true
-+                });
-+              } catch (e) {
-+                // non-configurable native slot: keep the native one
-+              }
++          const mirror = (key) => {
++            try {
++              Object.defineProperty(browserNs, key, {
++                value: chrome[key],
++                enumerable: true,
++                configurable: true
++              });
++            } catch (e) {
++              // non-configurable native slot: keep the native one
 +            }
++          };
++          for (const key of libDefinedKeys) mirror(key);
++          for (const key of Object.getOwnPropertyNames(chrome)) {
++            if (browserNs[key] === void 0) mirror(key);
 +          }
 +        }
 +      } catch (e) {

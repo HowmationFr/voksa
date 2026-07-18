@@ -858,11 +858,14 @@ export function registerIpcHandlers(): void {
         broadcastToChromes(IPC.SETTINGS_CHANGED, getSettings());
       }
 
-      const storages: ('cookies' | 'localstorage' | 'indexdb' | 'websql' | 'serviceworkers' | 'cachestorage')[] =
+      // 'websql' left the union with Electron 43 (WebSQL is gone from
+      // Chromium); 'filesystem' (File System API buckets) joined the site
+      // storage sweep instead: it IS site data a user expects wiped.
+      const storages: ('cookies' | 'localstorage' | 'indexdb' | 'filesystem' | 'serviceworkers' | 'cachestorage')[] =
         [];
       if (opts.cookies) storages.push('cookies');
       if (opts.siteStorage)
-        storages.push('localstorage', 'indexdb', 'websql', 'serviceworkers', 'cachestorage');
+        storages.push('localstorage', 'indexdb', 'filesystem', 'serviceworkers', 'cachestorage');
       try {
         if (opts.cache) await session.defaultSession.clearCache();
         if (storages.length) await session.defaultSession.clearStorageData({ storages });

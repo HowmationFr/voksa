@@ -1,0 +1,39 @@
+# Automated dependency updates. Security posture: Chromium fixes reach Voksa
+# through Electron patch releases, so the electron entry below is the one that
+# matters most; everything else keeps the supply chain current.
+#
+# Two repo-specific guardrails (see CLAUDE.md):
+#   - electron-chrome-extensions is PATCHED via patch-package (synthetic
+#     chrome.storage.onChanged + per-tab browser-action state). Bumping it
+#     without re-validating the patch silently breaks extensions like
+#     Bitwarden, so it is never auto-bumped.
+#   - Electron MAJOR upgrades are a planned migration (new Chromium major:
+#     UA plausibility, extension runtime compat, updater internals), never an
+#     automated PR. Patch/minor updates are exactly the security channel and
+#     flow through normally.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 10
+    ignore:
+      - dependency-name: electron-chrome-extensions
+      - dependency-name: electron
+        update-types: ["version-update:semver-major"]
+    groups:
+      # One weekly-ish PR for routine bumps; electron stays in its own PR so
+      # a security patch is visible (and mergeable) on its own.
+      minor-and-patch:
+        applies-to: version-updates
+        exclude-patterns:
+          - electron
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

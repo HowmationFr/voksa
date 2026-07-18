@@ -43,7 +43,7 @@ const FIREFOX_PLATFORM =
     : process.platform === 'win32'
       ? 'Windows NT 10.0; Win64; x64'
       : 'X11; Linux x86_64';
-const FIREFOX_UA = `Mozilla/5.0 (${FIREFOX_PLATFORM}; rv:128.0) Gecko/20100101 Firefox/128.0`;
+const FIREFOX_UA = `Mozilla/5.0 (${FIREFOX_PLATFORM}; rv:140.0) Gecko/20100101 Firefox/140.0`;
 
 function escapeReg(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

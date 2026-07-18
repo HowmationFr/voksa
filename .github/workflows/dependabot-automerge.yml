@@ -1,0 +1,34 @@
+# Auto-merge for Dependabot PRs: enables GitHub's auto-merge on the PR, which
+# only completes once EVERY required status check of the branch protection is
+# green (typecheck, lint, tests, packaging and the CDP smoke suite on all
+# three OS). A red check leaves the PR open for a human.
+#
+# Scope: patch and minor version bumps only. Electron majors never reach here
+# (excluded in dependabot.yml); any other major stays open for review.
+#
+# Requires, on the GitHub side: "Allow auto-merge" enabled in the repository
+# settings (Settings > General > Pull Requests).
+name: dependabot-automerge
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+      - name: Enable auto-merge for patch/minor updates
+        if: steps.metadata.outputs.update-type == 'version-update:semver-patch' || steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

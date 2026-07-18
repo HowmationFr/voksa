@@ -96,7 +96,7 @@ describe('UA strings', () => {
 
   it('Firefox platform token matches a real OS family (never an Electron-ish string)', () => {
     expect(getFirefoxUA()).toMatch(
-      /^Mozilla\/5\.0 \((Windows NT 10\.0; Win64; x64|Macintosh; Intel Mac OS X 10\.15|X11; Linux x86_64); rv:128\.0\) Gecko\/20100101 Firefox\/128\.0$/,
+      /^Mozilla\/5\.0 \((Windows NT 10\.0; Win64; x64|Macintosh; Intel Mac OS X 10\.15|X11; Linux x86_64); rv:140\.0\) Gecko\/20100101 Firefox\/140\.0$/,
     );
   });
 });

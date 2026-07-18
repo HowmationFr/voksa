@@ -1,7 +1,7 @@
 {
   "name": "voksa",
   "productName": "Voksa",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Voksa",
   "author": "Voksa",
   "license": "GPL-3.0-only",
@@ -26,7 +26,7 @@
     "package:linux": "npm run build && electron-builder --linux"
   },
   "dependencies": {
-    "better-sqlite3": "^12.0.0",
+    "better-sqlite3": "^12.11.1",
     "electron-chrome-extensions": "^4.9.0",
     "electron-chrome-web-store": "^0.13.0",
     "electron-updater": "^6.8.9"
@@ -41,16 +41,17 @@
     "@types/react-dom": "^18.3.0",
     "@typescript-eslint/eslint-plugin": "^8.8.1",
     "@typescript-eslint/parser": "^8.8.1",
-    "@vitejs/plugin-react": "^4.3.2",
+    "@vitejs/plugin-react": "^5.2.0",
     "autoprefixer": "^10.4.20",
-    "electron": "^38.0.0",
+    "electron": "^43.1.1",
     "electron-builder": "^26.15.3",
-    "esbuild": "^0.24.0",
+    "esbuild": "^0.28.1",
     "eslint": "^9.12.0",
     "eslint-plugin-react": "^7.37.1",
     "eslint-plugin-react-hooks": "^5.0.0",
     "lucide-react": "^0.453.0",
     "nanoid": "^5.0.7",
+    "node-abi": "^4.33.0",
     "patch-package": "^8.0.1",
     "postcss": "^8.4.47",
     "prettier": "^3.3.3",
@@ -60,12 +61,15 @@
     "tailwindcss": "^3.4.13",
     "typescript": "^5.6.2",
     "typescript-eslint": "^8.8.1",
-    "vite": "^5.4.8",
-    "vitest": "^2.1.2",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.10",
     "ws": "^8.21.0",
     "zustand": "^5.0.0"
   },
   "engines": {
     "node": ">=20"
+  },
+  "overrides": {
+    "adm-zip": "0.6.0"
   }
 }

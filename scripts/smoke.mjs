@@ -2172,17 +2172,54 @@ async function main() {
 
   // 1. THE uBO Lite death class: the module service worker must be running.
   //    A missing browser.* API kills it at module evaluation, silently: no
-  //    error anywhere, just no service worker target.
-  await waitFor(
-    'fixture module service worker running',
-    async () =>
-      (await listTargets()).some(
-        (t) => t.type !== 'page' && t.url === `chrome-extension://${contractId}/sw.js`,
-      ),
-    STEP_TIMEOUT_MS,
-    'the fixture service worker never started: a browser-namespace API is missing at module ' +
-      'evaluation (electron-chrome-extensions patch, browser mirror) or MV3 SW startup broke',
-  );
+  //    error anywhere, just no service worker target. On failure, dump the
+  //    world as seen from a fixture PAGE (pages outlive a dead worker) so a
+  //    platform-specific divergence is diagnosable straight from CI logs;
+  //    the [sw-console] relay in the harness output has the worker-side view.
+  try {
+    await waitFor(
+      'fixture module service worker running',
+      async () =>
+        (await listTargets()).some(
+          (t) => t.type !== 'page' && t.url === `chrome-extension://${contractId}/sw.js`,
+        ),
+      STEP_TIMEOUT_MS,
+      'the fixture service worker never started: a browser-namespace API is missing at module ' +
+        'evaluation (electron-chrome-extensions patch, browser mirror) or MV3 SW startup broke',
+    );
+  } catch (err) {
+    let world = 'page-world diagnosis unavailable';
+    try {
+      await ui.evaluate(
+        `window.voksa.tabs.create(${J(`chrome-extension://${contractId}/probe.html`)})`,
+      );
+      const diagTarget = await waitFor(
+        'diagnosis page target',
+        async () =>
+          (await listTargets()).find(
+            (t) => t.type === 'page' && t.url === `chrome-extension://${contractId}/probe.html`,
+          ),
+        STEP_TIMEOUT_MS,
+      );
+      const diagPage = await CdpClient.connect(diagTarget.webSocketDebuggerUrl, 'contract diagnosis');
+      clients.push(diagPage);
+      world = String(
+        await diagPage.evaluate(`(() => {
+          const t = (o, k) => { try { return typeof o[k]; } catch (e) { return 'ERR'; } };
+          return 'page world: browser=' + typeof globalThis.browser
+            + ' chrome=' + typeof globalThis.chrome
+            + ' same=' + (globalThis.browser === globalThis.chrome)
+            + ' b.permissions=' + t(globalThis.browser ?? {}, 'permissions')
+            + ' c.permissions=' + t(globalThis.chrome ?? {}, 'permissions')
+            + ' b.tabs=' + t(globalThis.browser ?? {}, 'tabs')
+            + ' c.tabs=' + t(globalThis.chrome ?? {}, 'tabs');
+        })()`),
+      );
+    } catch {
+      // keep the placeholder
+    }
+    throw new Error(`${err.message}\n[diagnosis] ${world}\n[diagnosis] see [sw-console] lines above for the worker-side view`);
+  }
 
   // 2. Probe page, driven from its own extension context.
   await ui.evaluate(
@@ -2198,9 +2235,14 @@ async function main() {
   );
   const contractPage = await CdpClient.connect(contractTarget.webSocketDebuggerUrl, 'contract probe');
   clients.push(contractPage);
+  // Body text renders before the script tag executes: wait for the probe API
+  // itself, not just the marker, or pokeStorage races the script evaluation.
   await waitFor(
-    'contract probe page rendered',
-    async () => (await contractPage.evaluate(`document.body.innerText`)).includes('CONTRACT-PROBE'),
+    'contract probe page ready (script evaluated)',
+    async () =>
+      contractPage.evaluate(
+        `document.body.innerText.includes('CONTRACT-PROBE') && typeof window.pokeStorage === 'function' && typeof window.report === 'function'`,
+      ),
     STEP_TIMEOUT_MS,
   );
 

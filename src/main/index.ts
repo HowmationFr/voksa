@@ -248,6 +248,13 @@ async function start() {
   // inert in production. AFTER setupChromeWebStore, so both libraries'
   // session preloads apply to the fixture's contexts like to any extension.
   if (process.env.VOKSA_DEBUG_PORT && process.env.VOKSA_DEBUG_LOAD_EXTENSION) {
+    // Surface extension service worker console output on stdout: an MV3 SW
+    // that dies at module evaluation does so SILENTLY (no CDP target, no
+    // page-side error); this listener is what lets the smoke and the CI logs
+    // see the world it died in.
+    session.defaultSession.serviceWorkers.on('console-message', (_e, m) => {
+      console.log(`[sw-console:${m.level}] ${String(m.message).slice(0, 500)}`);
+    });
     for (const dir of process.env.VOKSA_DEBUG_LOAD_EXTENSION.split(path.delimiter)) {
       if (!dir.trim()) continue;
       try {

@@ -5,6 +5,35 @@
 // no service worker target: that is the point of this fixture.
 const seen = { storageChanges: [] };
 
+// Forensic line, BEFORE the killer registrations: when the worker dies at
+// evaluation on some platform, the harness's [sw-console] relay shows the
+// exact world it died in (which namespaces exist, whether they diverge, and
+// the property descriptor of the first API the killer line dereferences).
+try {
+  const d = (o, k) => {
+    try {
+      const desc = Object.getOwnPropertyDescriptor(o, k);
+      return desc ? `{${typeof desc.value},cfg:${desc.configurable},get:${!!desc.get}}` : 'absent';
+    } catch (e) {
+      return 'ERR:' + e.message;
+    }
+  };
+  console.log(
+    'CONTRACT-SW-WORLD'
+    + ' browser=' + typeof globalThis.browser
+    + ' chrome=' + typeof globalThis.chrome
+    + ' same=' + (globalThis.browser === globalThis.chrome)
+    + ' b.permissions=' + (typeof globalThis.browser === 'undefined' ? 'n/a' : typeof browser.permissions)
+    + ' c.permissions=' + (typeof globalThis.chrome === 'undefined' ? 'n/a' : typeof chrome.permissions)
+    + ' b.tabs=' + (typeof globalThis.browser === 'undefined' ? 'n/a' : typeof browser.tabs)
+    + ' c.tabs=' + (typeof globalThis.chrome === 'undefined' ? 'n/a' : typeof chrome.tabs)
+    + ' desc(b,permissions)=' + (typeof globalThis.browser === 'undefined' ? 'n/a' : d(browser, 'permissions'))
+    + ' desc(b,tabs)=' + (typeof globalThis.browser === 'undefined' ? 'n/a' : d(browser, 'tabs')),
+  );
+} catch (e) {
+  console.log('CONTRACT-SW-WORLD probe failed: ' + e.message);
+}
+
 browser.permissions.onRemoved.addListener(() => {});
 browser.tabs.onRemoved.addListener(() => {});
 

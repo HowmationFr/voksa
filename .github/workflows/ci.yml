@@ -58,6 +58,15 @@ jobs:
         run: npm ci
       - name: Build (UI + main)
         run: npm run build
+      # Ubuntu 24 restricts unprivileged user namespaces (AppArmor), which is
+      # what used to force --no-sandbox here. But --no-sandbox silently
+      # disables Electron's service-worker preload realms, killing every MV3
+      # extension service worker (caught by the extension contract scenario).
+      # Lifting the restriction lets Electron run with its real sandbox, the
+      # same configuration users get.
+      - name: Allow unprivileged user namespaces (Electron sandbox)
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Boot smoke test (Linux, under Xvfb)
         if: runner.os == 'Linux'
         timeout-minutes: 15

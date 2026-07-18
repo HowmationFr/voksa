@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Voksa Contract Probe",
+  "version": "1.0.0",
+  "description": "Smoke-test fixture: exercises the extension-runtime contract Voksa promises (module service worker, browser namespace, tabs, storage events, i18n). Never shipped.",
+  "default_locale": "en",
+  "background": { "service_worker": "sw.js", "type": "module" },
+  "permissions": ["activeTab", "alarms", "declarativeNetRequest", "scripting", "storage"],
+  "action": { "default_title": "__MSG_probeTitle__" },
+  "options_page": "probe.html"
+}

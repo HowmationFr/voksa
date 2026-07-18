@@ -84,7 +84,16 @@ try {
     app.getPreferredSystemLanguages()[0] ??
     Intl.DateTimeFormat().resolvedOptions().locale ??
     'en';
-  app.commandLine.appendSwitch('lang', resolveLanguage(getSettings().language, systemLocale));
+  const chromiumLang = resolveLanguage(getSettings().language, systemLocale);
+  app.commandLine.appendSwitch('lang', chromiumLang);
+  // Linux honours the ENVIRONMENT, not --lang: Chromium resolves its locale
+  // from LANGUAGE/LC_ALL/LANG there (lived: the extension-contract i18n
+  // assertion stayed English on the Linux runner while Windows and macOS
+  // followed the switch). LANGUAGE is the strongest override and needs no
+  // generated locale db. Set before 'ready', like the switch.
+  if (process.platform === 'linux') {
+    process.env.LANGUAGE = chromiumLang;
+  }
 } catch {
   // settings unreadable: keep Chromium's own locale detection
 }

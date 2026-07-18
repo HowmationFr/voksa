@@ -5,6 +5,11 @@ name: CI
 
 on:
   pull_request:
+  # Merge queue support: the queue builds "latest main + queued PR(s)" itself
+  # and runs the required checks on that combination. Without this trigger a
+  # queued PR would wait forever for checks that never start. Inert as long
+  # as no merge queue is enabled on the branch.
+  merge_group:
   push:
     branches: [main]
 
@@ -17,8 +22,8 @@ jobs:
     name: Checks (lint, types, tests)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -44,8 +49,8 @@ jobs:
       # goal is only to prove that packaging succeeds.
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm

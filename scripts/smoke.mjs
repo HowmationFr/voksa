@@ -1480,11 +1480,25 @@ async function main() {
   );
   const pdfPage = await CdpClient.connect(pdfTarget.webSocketDebuggerUrl, 'pdf page');
   clients.push(pdfPage);
+  // Two viewer architectures, both accepted: the pre-OOPIF viewer renders an
+  // <embed> in the top document; the OOPIF viewer (newer Chromium, reached
+  // with Electron 43) leaves the embedder's DOM empty and attaches the PDF
+  // extension (fixed Chromium id) as its own frame target instead. Without
+  // plugins:true NEITHER exists: the navigation becomes a download and the
+  // first wait above already failed.
+  const PDF_VIEWER_EXT = 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/';
   await waitFor(
-    'PDF viewer embed present',
-    async () => pdfPage.evaluate(`document.querySelector('embed') !== null`),
+    'PDF viewer surface present',
+    async () => {
+      const hasEmbed = await pdfPage
+        .evaluate(`document.querySelector('embed') !== null`)
+        .catch(() => false);
+      if (hasEmbed) return true;
+      const list = await listTargets();
+      return list.some((t) => (t.url ?? '').startsWith(PDF_VIEWER_EXT));
+    },
     STEP_TIMEOUT_MS,
-    'the pdf URL committed but no viewer embed rendered',
+    'the pdf URL committed but no viewer surface rendered (neither an <embed> nor the pdf extension frame)',
   );
   const downloads = await ui.evaluate(`window.voksa.downloads.list()`);
   if (Array.isArray(downloads) && downloads.some((d) => (d.url ?? '').includes('/doc.pdf'))) {

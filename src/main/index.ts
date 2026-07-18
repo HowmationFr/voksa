@@ -86,14 +86,12 @@ try {
     'en';
   const chromiumLang = resolveLanguage(getSettings().language, systemLocale);
   app.commandLine.appendSwitch('lang', chromiumLang);
-  // Linux honours the ENVIRONMENT, not --lang: Chromium resolves its locale
-  // from LANGUAGE/LC_ALL/LANG there (lived: the extension-contract i18n
-  // assertion stayed English on the Linux runner while Windows and macOS
-  // followed the switch). LANGUAGE is the strongest override and needs no
-  // generated locale db. Set before 'ready', like the switch.
-  if (process.platform === 'linux') {
-    process.env.LANGUAGE = chromiumLang;
-  }
+  // Honest platform limit: LINUX ignores --lang, and setting LANGUAGE/LANG
+  // from here is too late as well (Chromium samples the LAUNCH environment
+  // before main JS runs; lived on the Linux CI runner). So on Linux the
+  // extension locale follows the OS environment, exactly like Chrome, and
+  // the in-app language setting governs Voksa's own UI only. Windows and
+  // macOS honour the switch, so extensions follow the setting there.
 } catch {
   // settings unreadable: keep Chromium's own locale detection
 }

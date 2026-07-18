@@ -164,6 +164,15 @@ const env = {
   VOKSA_DEBUG_PROFILE: profile,
   VOKSA_DEBUG_PORT: String(PORT),
   VOKSA_DEBUG_LOAD_EXTENSION: CONTRACT_EXT_DIR,
+  // Linux resolves the Chromium locale from the LAUNCH environment; --lang
+  // and env vars set later from the main process both come too late for the
+  // browser-side extension catalogs (lived: the i18n contract assertion
+  // stayed English on the Linux runner only). Pinning the environment here
+  // is exactly "a French Linux user": the profile language (seeded above)
+  // and the process locale agree, like they do for real users. Harmless on
+  // Windows/macOS, which follow --lang.
+  LANGUAGE: 'fr',
+  LANG: 'fr_FR.UTF-8',
 };
 // A machine-wide ELECTRON_RUN_AS_NODE would turn the electron binary into a
 // bare Node process and the smoke test into a false negative.

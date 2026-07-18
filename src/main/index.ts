@@ -201,18 +201,15 @@ async function createWindow(opts?: BootstrapOptions): Promise<AppWindow> {
 
 async function start() {
   await app.whenReady();
-  // Packaged only: in dev this would register ELECTRON.EXE as an http handler
-  // in the developer's registry / LaunchServices. The real Windows candidacy
-  // (Settings > Default apps) comes from the NSIS installer registry keys
-  // (resources/installer.nsh), not from this call; macOS/Linux honour it.
-  if (app.isPackaged) {
-    try {
-      app.setAsDefaultProtocolClient('http');
-      app.setAsDefaultProtocolClient('https');
-    } catch {
-      // best-effort; not fatal
-    }
-  }
+  // NO setAsDefaultProtocolClient at boot, on ANY platform (removed v0.5.1).
+  // Candidacy does not need it: Windows reads the NSIS installer registry
+  // (resources/installer.nsh), macOS reads CFBundleURLTypes, Linux reads the
+  // .desktop MimeType. And the call itself is harmful at boot: on Windows it
+  // writes the legacy registration that made isDefaultProtocolClient answer
+  // yes to its own echo (Voksa claimed default while Chrome opened links);
+  // on Linux it runs xdg-settings SET, silently stealing the user's default
+  // at every launch. Becoming the default is a USER gesture: the settings
+  // card button (APP_SET_DEFAULT_BROWSER) is the only caller.
 
   // App-global singletons, in dependency order and all BEFORE the first
   // window: the UA webRequest hook and the extension runtime register

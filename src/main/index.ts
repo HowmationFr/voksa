@@ -240,6 +240,24 @@ async function start() {
   chromeUA = applyUserAgentOverride();
   registerIpcHandlers();
   await setupChromeWebStore(session.defaultSession);
+
+  // Debug-only seam (smoke): load unpacked test extensions handed over by the
+  // harness. The web-store loader only discovers store-installed layouts, so
+  // the contract fixture (scripts/fixtures/contract-extension) needs an
+  // explicit load. Gated on the CDP debug port like voksa.capture.simulate:
+  // inert in production. AFTER setupChromeWebStore, so both libraries'
+  // session preloads apply to the fixture's contexts like to any extension.
+  if (process.env.VOKSA_DEBUG_PORT && process.env.VOKSA_DEBUG_LOAD_EXTENSION) {
+    for (const dir of process.env.VOKSA_DEBUG_LOAD_EXTENSION.split(path.delimiter)) {
+      if (!dir.trim()) continue;
+      try {
+        await session.defaultSession.extensions.loadExtension(dir.trim());
+      } catch (err) {
+        console.warn('[debug] loadExtension failed:', dir, err);
+      }
+    }
+  }
+
   setWindowFactory((url?: string) =>
     createWindow({ open: url ? { kind: 'url', url } : { kind: 'newtab' } }),
   );

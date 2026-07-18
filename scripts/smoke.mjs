@@ -84,7 +84,7 @@
 // Usage: npm run build && node scripts/smoke.mjs
 // (on Linux CI wrap with `xvfb-run -a`)
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import os from 'node:os';
@@ -140,7 +140,31 @@ const EXT_WEBSTORE_READY = '[extensions] Chrome Web Store ready on session.';
 // running instance for the single-instance lock.
 const profile = mkdtempSync(path.join(os.tmpdir(), 'voksa-smoke-'));
 
-const env = { ...process.env, VOKSA_DEBUG_PROFILE: profile, VOKSA_DEBUG_PORT: String(PORT) };
+// Pin the profile to FRENCH before first boot (the effective userData is
+// <profile>/voksa: index.ts re-pins userData under appData). This makes the
+// extension-contract i18n assertion deterministic on English CI runners too:
+// the Chromium lang switch and the localized getMessage patch must resolve
+// the fixture's fr catalog whatever the host OS speaks. No smoke assertion
+// matches language-dependent UI text (the one textual click handles both
+// Annuler/Cancel), so the rest of the suite is unaffected. startupMode is
+// pinned too: an existing settings.json without the key would be migrated to
+// 'restore' (CLAUDE.md 4.13), and the suite expects a new-tab boot.
+mkdirSync(path.join(profile, 'voksa'), { recursive: true });
+writeFileSync(
+  path.join(profile, 'voksa', 'settings.json'),
+  JSON.stringify({ language: 'fr', startupMode: 'newtab' }),
+);
+
+// The contract fixture (scenario 26) is loaded through the debug-only seam in
+// src/main/index.ts; the harness just points at it.
+const CONTRACT_EXT_DIR = path.join(root, 'scripts', 'fixtures', 'contract-extension');
+
+const env = {
+  ...process.env,
+  VOKSA_DEBUG_PROFILE: profile,
+  VOKSA_DEBUG_PORT: String(PORT),
+  VOKSA_DEBUG_LOAD_EXTENSION: CONTRACT_EXT_DIR,
+};
 // A machine-wide ELECTRON_RUN_AS_NODE would turn the electron binary into a
 // bare Node process and the smoke test into a false negative.
 delete env.ELECTRON_RUN_AS_NODE;
@@ -2127,7 +2151,115 @@ async function main() {
   await ui.evaluate(`window.voksa.tabs.close(${J(routeTabId)})`);
   pass('AUDIO ROUTING');
 
-  // --- 26. NO RENDERER EXCEPTIONS -------------------------------------------------
+  // --- 26. EXTENSION CONTRACT ------------------------------------------------------
+  // The fixture (scripts/fixtures/contract-extension) is built to die exactly
+  // where real extensions died in the wild: a MODULE service worker using the
+  // native `browser` namespace with top-level listener registrations (uBO
+  // Lite's death), tabs.query needing real URLs (its starved popup), the
+  // storage.onChanged relay (Bitwarden's frozen vault), and i18n resolving
+  // the profile language instead of the extension's default locale. Each
+  // assertion maps to a patch guarantee; any regression turns it red.
+  const contractExt = await waitFor(
+    'contract fixture loaded',
+    async () => {
+      const list = await ui.evaluate(`window.voksa.extensions.list()`);
+      return (list ?? []).find((e) => e.name === 'Voksa Contract Probe');
+    },
+    STEP_TIMEOUT_MS,
+    'the debug seam VOKSA_DEBUG_LOAD_EXTENSION did not load the fixture (src/main/index.ts)',
+  );
+  const contractId = contractExt.id;
+
+  // 1. THE uBO Lite death class: the module service worker must be running.
+  //    A missing browser.* API kills it at module evaluation, silently: no
+  //    error anywhere, just no service worker target.
+  await waitFor(
+    'fixture module service worker running',
+    async () =>
+      (await listTargets()).some(
+        (t) => t.type !== 'page' && t.url === `chrome-extension://${contractId}/sw.js`,
+      ),
+    STEP_TIMEOUT_MS,
+    'the fixture service worker never started: a browser-namespace API is missing at module ' +
+      'evaluation (electron-chrome-extensions patch, browser mirror) or MV3 SW startup broke',
+  );
+
+  // 2. Probe page, driven from its own extension context.
+  await ui.evaluate(
+    `window.voksa.tabs.create(${J(`chrome-extension://${contractId}/probe.html`)})`,
+  );
+  const contractTarget = await waitFor(
+    'contract probe page CDP target',
+    async () =>
+      (await listTargets()).find(
+        (t) => t.type === 'page' && t.url === `chrome-extension://${contractId}/probe.html`,
+      ),
+    STEP_TIMEOUT_MS,
+  );
+  const contractPage = await CdpClient.connect(contractTarget.webSocketDebuggerUrl, 'contract probe');
+  clients.push(contractPage);
+  await waitFor(
+    'contract probe page rendered',
+    async () => (await contractPage.evaluate(`document.body.innerText`)).includes('CONTRACT-PROBE'),
+    STEP_TIMEOUT_MS,
+  );
+
+  // 3. storage.onChanged relay: poke storage from the page, the background
+  //    must SEE the change (the historic Bitwarden bug).
+  await contractPage.evaluate(`window.pokeStorage()`);
+  const contract = await waitFor(
+    'contract report (service worker reachable, storage change relayed)',
+    async () => {
+      const r = await contractPage.evaluate(`window.report()`).catch(() => null);
+      return r && r.sw && r.sw.swAlive && (r.sw.storageChanges ?? []).length > 0 ? r : null;
+    },
+    STEP_TIMEOUT_MS,
+    'the service worker answered nothing or never received storage.onChanged (patch, synthetic ' +
+      'storage.onChanged relay)',
+  );
+
+  // 4. The whole contract, assertion by assertion.
+  if (contract.sw.error) {
+    throw new Error(`fixture service worker reported an error: ${contract.sw.error}`);
+  }
+  if (contract.page.namespacesUnified !== true || contract.sw.namespacesUnified !== true) {
+    throw new Error(
+      `browser and chrome namespaces diverged (page: ${contract.page.namespacesUnified}, sw: ${contract.sw.namespacesUnified}): ` +
+        'an extension using browser.* gets a poorer API than one using chrome.* (patch, mirror granularity)',
+    );
+  }
+  if (!(contract.page.tabsWithUrl >= 1)) {
+    throw new Error(
+      `tabs.query returned ${contract.page.tabCount} tab(s) but ${contract.page.tabsWithUrl} carry a url: ` +
+        'an extension popup cannot know what site it is on (the uBO Lite starved-popup class)',
+    );
+  }
+  if (contract.page.openOptionsPage !== 'function') {
+    throw new Error('runtime.openOptionsPage is not a function: extension settings buttons are dead');
+  }
+  // 5. i18n: the profile is pinned to FRENCH (see the settings.json seeding at
+  //    the top), so the fixture's fr catalog must win over its default_locale
+  //    (en), in the page AND in the service worker. The catalog loads
+  //    asynchronously in each realm: poll rather than assert a snapshot.
+  //    A stable 'english-probe' means getMessage is stuck on the default
+  //    locale again (localized getMessage in the patch, or the Chromium lang
+  //    switch in index.ts).
+  await waitFor(
+    'extension i18n resolves the profile language in both realms',
+    async () => {
+      const r = await contractPage.evaluate(`window.report()`).catch(() => null);
+      return r && r.page.i18nMessage === 'sonde-francaise' && r.sw.i18nMessage === 'sonde-francaise';
+    },
+    STEP_TIMEOUT_MS,
+    'getMessage kept answering the default locale: localized getMessage (patch) or the Chromium ' +
+      'lang switch (index.ts) broke',
+  );
+  const contractTabs = await ui.evaluate(`window.voksa.tabs.list()`);
+  const contractTab = (contractTabs ?? []).find((t) => (t.url ?? '').includes(contractId));
+  if (contractTab) await ui.evaluate(`window.voksa.tabs.close(${J(contractTab.id)})`);
+  pass('EXTENSION CONTRACT');
+
+  // --- 27. NO RENDERER EXCEPTIONS -------------------------------------------------
   if (uiExceptions.length > 0) {
     throw new Error(
       `chrome UI threw ${uiExceptions.length} uncaught exception(s) during the run:\n${uiExceptions.join('\n')}`,

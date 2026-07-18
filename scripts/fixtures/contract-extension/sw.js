@@ -30,6 +30,15 @@ try {
     + ' desc(b,permissions)=' + (typeof globalThis.browser === 'undefined' ? 'n/a' : d(browser, 'permissions'))
     + ' desc(b,tabs)=' + (typeof globalThis.browser === 'undefined' ? 'n/a' : d(browser, 'tabs')),
   );
+  // Native-vs-library discriminator: the library's tabs surface carries
+  // create/query/onCreated; Electron's bare native SW stub does not. If keys
+  // read native-only here, the library preload never ran in this realm.
+  console.log(
+    'CONTRACT-SW-TABS keys=' + Object.keys(chrome.tabs ?? {}).sort().join(',').slice(0, 300)
+    + ' | create=' + (chrome.tabs ? typeof chrome.tabs.create : 'n/a')
+    + ' | i18n=' + typeof chrome.i18n
+    + ' | electron=' + typeof globalThis.electron,
+  );
 } catch (e) {
   console.log('CONTRACT-SW-WORLD probe failed: ' + e.message);
 }

@@ -5,6 +5,7 @@ import type {
   PrintExecuteOptions,
   PrintExecuteResult,
   PrinterInfo,
+  PrintMarginType,
   PrintPreviewOptions,
 } from '../shared/types';
 import { pageRangesToString, parsePageRanges } from '../shared/printUtils';
@@ -102,12 +103,28 @@ export class PrintController {
     }
   }
 
+  /**
+   * printToPDF wants numeric margins in inches, not the `marginType` presets
+   * `webContents.print()` takes. Electron typed printToPDF's margins as print()'s
+   * `Margins` until 43.4.1 (it now has its own `PrintToPDFMargins`), but the
+   * runtime never read `marginType` there, so the preset was silently dropped and
+   * every PDF came out with the default margins. `printableArea` collapses to 0:
+   * a PDF has no unprintable border, so the preset only means something on a
+   * physical device, where `execute()` still passes `marginType` straight through.
+   */
+  private static readonly PDF_MARGIN_INCHES: Record<PrintMarginType, number> = {
+    default: 0.4, // Chromium's own printToPDF default (1cm).
+    printableArea: 0,
+    none: 0,
+  };
+
   private pdfOptions(opts: PrintPreviewOptions): Electron.PrintToPDFOptions {
     const ranges = parsePageRanges(opts.pageRanges);
+    const margin = PrintController.PDF_MARGIN_INCHES[opts.marginType];
     const pdf: Electron.PrintToPDFOptions = {
       landscape: opts.landscape,
       printBackground: opts.printBackground,
-      margins: { marginType: opts.marginType },
+      margins: { top: margin, bottom: margin, left: margin, right: margin },
     };
     if (ranges.length > 0) pdf.pageRanges = pageRangesToString(ranges);
     return pdf;

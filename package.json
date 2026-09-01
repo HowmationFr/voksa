@@ -51,7 +51,7 @@
     "eslint-plugin-react-hooks": "^5.0.0",
     "lucide-react": "^0.577.0",
     "nanoid": "^5.1.16",
-    "node-abi": "^4.34.0",
+    "node-abi": "^4.35.0",
     "patch-package": "^8.0.1",
     "postcss": "^8.5.26",
     "prettier": "^3.9.6",

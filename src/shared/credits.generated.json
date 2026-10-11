@@ -1,7 +1,7 @@
 [
   {
     "name": "@fontsource-variable/inter",
-    "version": "5.2.8",
+    "version": "5.3.0",
     "license": "OFL-1.1",
     "homepage": "https://fontsource.org/fonts/inter",
     "licenseUrl": null,
@@ -41,7 +41,7 @@
   },
   {
     "name": "adm-zip",
-    "version": "0.6.0",
+    "version": "0.6.1",
     "license": "MIT",
     "homepage": "https://github.com/cthackers/adm-zip",
     "licenseUrl": null,
@@ -153,7 +153,7 @@
   },
   {
     "name": "electron",
-    "version": "43.1.1",
+    "version": "44.7.0",
     "license": "MIT",
     "homepage": "https://github.com/electron/electron",
     "licenseUrl": null,
@@ -273,7 +273,7 @@
   },
   {
     "name": "js-yaml",
-    "version": "4.3.0",
+    "version": "4.3.2",
     "license": "MIT",
     "homepage": "nodeca/js-yaml",
     "licenseUrl": null,
@@ -321,11 +321,11 @@
   },
   {
     "name": "lucide-react",
-    "version": "0.453.0",
+    "version": "0.577.0",
     "license": "ISC",
     "homepage": "https://lucide.dev",
     "licenseUrl": null,
-    "text": "ISC License\n\nCopyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of Feather (MIT). All other copyright (c) for Lucide are held by Lucide Contributors 2022.\n\nPermission to use, copy, modify, and/or distribute this software for any\npurpose with or without fee is hereby granted, provided that the above\ncopyright notice and this permission notice appear in all copies.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES\nWITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF\nMERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR\nANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES\nWHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN\nACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF\nOR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE."
+    "text": "ISC License\n\nCopyright (c) for portions of Lucide are held by Cole Bemis 2013-2026 as part of Feather (MIT). All other copyright (c) for Lucide are held by Lucide Contributors 2026.\n\nPermission to use, copy, modify, and/or distribute this software for any\npurpose with or without fee is hereby granted, provided that the above\ncopyright notice and this permission notice appear in all copies.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES\nWITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF\nMERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR\nANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES\nWHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN\nACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF\nOR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.\n\n---\n\nThe MIT License (MIT) (for portions derived from Feather)\n\nCopyright (c) 2013-2026 Cole Bemis\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
   },
   {
     "name": "mimic-response",
@@ -369,7 +369,7 @@
   },
   {
     "name": "node-abi",
-    "version": "3.89.0",
+    "version": "3.94.0",
     "license": "MIT",
     "homepage": "https://github.com/electron/node-abi#readme",
     "licenseUrl": null,
@@ -393,7 +393,7 @@
   },
   {
     "name": "pbf",
-    "version": "4.0.1",
+    "version": "4.0.2",
     "license": "BSD-3-Clause",
     "homepage": "https://github.com/mapbox/pbf",
     "licenseUrl": null,
@@ -473,7 +473,7 @@
   },
   {
     "name": "sax",
-    "version": "1.6.0",
+    "version": "1.6.1",
     "license": "BlueOak-1.0.0",
     "homepage": "https://github.com/isaacs/sax-js",
     "licenseUrl": null,
@@ -489,7 +489,7 @@
   },
   {
     "name": "semver",
-    "version": "7.7.4",
+    "version": "7.8.5",
     "license": "ISC",
     "homepage": "https://github.com/npm/node-semver",
     "licenseUrl": null,
@@ -537,7 +537,7 @@
   },
   {
     "name": "tar-fs",
-    "version": "2.1.4",
+    "version": "2.1.5",
     "license": "MIT",
     "homepage": "https://github.com/mafintosh/tar-fs",
     "licenseUrl": null,
@@ -593,7 +593,7 @@
   },
   {
     "name": "zustand",
-    "version": "5.0.12",
+    "version": "5.0.15",
     "license": "MIT",
     "homepage": "https://github.com/pmndrs/zustand",
     "licenseUrl": null,

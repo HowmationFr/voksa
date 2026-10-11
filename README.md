@@ -214,8 +214,8 @@ Grab the file for your platform from the [latest release](https://github.com/How
 | Platform | File | Notes |
 |---|---|---|
 | Windows | `Voksa-Setup-x.y.z.exe` | Unsigned for now: SmartScreen may warn on first run. Click "More info", then "Run anyway". |
-| macOS (Apple Silicon) | `Voksa-x.y.z-mac-arm64.dmg` | Signed and notarized by Apple. |
-| macOS (Intel) | `Voksa-x.y.z-mac-x64.dmg` | Signed and notarized by Apple. |
+| macOS (Apple Silicon) | `Voksa-x.y.z-mac-arm64.dmg` | Signed and notarized by Apple. Requires macOS 13 (Ventura) or later. |
+| macOS (Intel) | `Voksa-x.y.z-mac-x64.dmg` | Signed and notarized by Apple. Requires macOS 13 (Ventura) or later. |
 | Linux | `Voksa-x.y.z.AppImage` | Self-updating. A `.deb` is also available (manual updates). |
 
 Once installed, Voksa updates itself automatically in the background.

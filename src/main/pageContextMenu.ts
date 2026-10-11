@@ -118,7 +118,8 @@ export class PageMenuController {
         if (params.linkURL) this.tabs.create(params.linkURL, { activate: action === 'open-link' });
         break;
       case 'copy-link':
-        if (params.linkURL) clipboard.writeText(params.linkURL);
+        // clipboard.writeText returns a Promise since Electron 44.
+        if (params.linkURL) void clipboard.writeText(params.linkURL).catch(() => {});
         break;
       case 'open-image':
         if (params.srcURL) this.tabs.create(params.srcURL);
@@ -127,7 +128,7 @@ export class PageMenuController {
         wc.copyImageAt(params.x, params.y);
         break;
       case 'copy-image-url':
-        if (params.srcURL) clipboard.writeText(params.srcURL);
+        if (params.srcURL) void clipboard.writeText(params.srcURL).catch(() => {});
         break;
       case 'save-image':
         if (params.srcURL) {

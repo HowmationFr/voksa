@@ -139,3 +139,26 @@ jobs:
             exit 1
           fi
           echo "All expected artifacts are attached."
+      # Electron 44 (Chromium 152) dropped macOS 12: the new build no longer
+      # launches there, and a Monterey install would auto-update into an app
+      # that does not open. electron-updater (already in every shipped build)
+      # skips an update whose latest-mac.yml carries a minimumSystemVersion
+      # above os.release(), which on macOS is the DARWIN version (macOS 13 =
+      # Darwin 22). electron-builder has no config knob for that field
+      # (releaseInfo rejects extra keys), so it is stamped here, on the draft,
+      # before anyone can publish it.
+      - name: Keep macOS 12 installs off an update they cannot run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MIN_DARWIN: '22.0.0'
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release download "$TAG" -R "${GITHUB_REPOSITORY}" -p latest-mac.yml -D mac-yml --clobber
+          f=mac-yml/latest-mac.yml
+          sed -i '/^minimumSystemVersion:/d' "$f"
+          [ -z "$(tail -c1 "$f")" ] || echo >> "$f"
+          echo "minimumSystemVersion: ${MIN_DARWIN}" >> "$f"
+          cat "$f"
+          gh release upload "$TAG" -R "${GITHUB_REPOSITORY}" "$f" --clobber
+          gh release download "$TAG" -R "${GITHUB_REPOSITORY}" -p latest-mac.yml -O - | grep -qx "minimumSystemVersion: ${MIN_DARWIN}" \
+            || { echo "::error::latest-mac.yml on the draft does not carry minimumSystemVersion ${MIN_DARWIN}: macOS 12 installs would auto-update into a build that cannot launch."; exit 1; }

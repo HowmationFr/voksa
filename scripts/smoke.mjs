@@ -2530,6 +2530,11 @@ async function main() {
       `getMessage('probePlaceholder', ['x']) gave ${J(localized.page.i18nPlaceholder)}: $who$ / $1 substitution broke (patch, localized getMessage)`,
     );
   }
+  if (localized.page.i18nEscaped !== '&lt;b><i>&lt;/b> francais') {
+    throw new Error(
+      `getMessage('probeEscape', ['<i>'], {escapeLt: true}) gave ${J(localized.page.i18nEscaped)}: escapeLt dropped (patch, localized getMessage)`,
+    );
+  }
   // 6. Event objects: removeListener / hasListener work (patched ExtensionEvent).
   if (localized.page.events?.had !== true || localized.page.events?.after !== false) {
     throw new Error(

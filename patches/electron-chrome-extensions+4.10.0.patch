@@ -1,5 +1,5 @@
 diff --git a/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js b/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js
-index 67d3be4..20c29ec 100644
+index 67d3be4..7d626a9 100644
 --- a/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js
 +++ b/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js
 @@ -14,6 +14,10 @@
@@ -97,7 +97,7 @@ index 67d3be4..20c29ec 100644
          }
        }
        class ChromeSetting {
-@@ -365,7 +395,74 @@
+@@ -365,7 +395,76 @@
            shouldInject: () => manifest.manifest_version === 3,
            factory: (base) => {
              if (base.getMessage) {
@@ -147,11 +147,11 @@ index 67d3be4..20c29ec 100644
 +                }
 +                if (found) state.map = merged;
 +              })();
-+              const localizedGetMessage = (messageName, substitutions) => {
++              const localizedGetMessage = (messageName, substitutions, options) => {
 +                const key = typeof messageName === "string" ? messageName.toLowerCase() : "";
 +                const entry = state.map ? state.map[key] : null;
 +                if (!entry || typeof entry.message !== "string" || key.startsWith("@@")) {
-+                  return base.getMessage(messageName, substitutions);
++                  return base.getMessage(messageName, substitutions, options);
 +                }
 +                const placeholders = {};
 +                if (entry.placeholders) {
@@ -161,19 +161,21 @@ index 67d3be4..20c29ec 100644
 +                }
 +                const subs = substitutions == null ? [] : [].concat(substitutions);
 +                const fill = (text) => text.replace(/\$\$|\$(\d)/g, (m, i) => m === "$$" ? "$" : String(subs[Number(i) - 1] ?? ""));
-+                // $name$ placeholders first (their content may use $1..$9),
-+                // then $n / $$ in one pass (so "$$1" stays a literal "$1").
-+                const msg = entry.message.replace(/\$([A-Za-z0-9_@]+)\$/g, (m, name) => {
++                // Chromium's order: $name$ placeholders (their content may use
++                // $1..$9), then escapeLt, then $n / $$ in one pass (so "$$1"
++                // stays a literal "$1" and substitutions are never escaped).
++                let msg = entry.message.replace(/\$([A-Za-z0-9_@]+)\$/g, (m, name) => {
 +                  const lower = name.toLowerCase();
 +                  return Object.prototype.hasOwnProperty.call(placeholders, lower) ? placeholders[lower] : m;
 +                });
++                if (options && typeof options === "object" && options.escapeLt === true) msg = msg.replace(/</g, "&lt;");
 +                return fill(msg);
 +              };
 +              return { ...base, getMessage: localizedGetMessage };
              }
              return {
                ...base,
-@@ -449,12 +546,107 @@
+@@ -449,12 +548,107 @@
          },
          storage: {
            factory: (base) => {
@@ -283,7 +285,7 @@ index 67d3be4..20c29ec 100644
              };
            }
          },
-@@ -555,6 +747,7 @@
+@@ -555,6 +749,7 @@
            }
          }
        };
@@ -291,7 +293,7 @@ index 67d3be4..20c29ec 100644
        Object.keys(apiDefinitions).forEach((key) => {
          const apiName = key;
          const baseApi = chrome[apiName];
-@@ -565,8 +758,45 @@
+@@ -565,8 +760,45 @@
            enumerable: true,
            configurable: true
          });

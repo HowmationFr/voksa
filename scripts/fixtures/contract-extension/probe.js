@@ -15,6 +15,8 @@ window.report = async () => {
       // Chromium resolves message AND placeholder names case-insensitively.
       i18nCase: browser.i18n.getMessage('PROBECASE'),
       i18nPlaceholder: browser.i18n.getMessage('probePlaceholder', ['x']),
+      // escapeLt escapes the message's own '<', never the substitutions.
+      i18nEscaped: browser.i18n.getMessage('probeEscape', ['<i>'], { escapeLt: true }),
       // chrome.* events must honor removeListener / hasListener (the patched
       // storage.onChanged used to throw on hasListener and never remove).
       events: (() => {

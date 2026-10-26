@@ -411,39 +411,9 @@ export function installStreamMasker(host: MaskerHost): void {
     redactedEls.clear();
   }
 
-  // --- WebRTC stub -----------------------------------------------------------
-  let webrtcStubbed = false;
-  const realRTC = window.RTCPeerConnection;
-  function installWebRTCStub(): void {
-    if (webrtcStubbed || !realRTC) return;
-    if (!config?.blockWebRTC) return;
-    webrtcStubbed = true;
-    const Blocked = function (): never {
-      throw new Error('RTCPeerConnection blocked by Stream Mode');
-    } as unknown as typeof RTCPeerConnection;
-    try {
-      Object.defineProperty(window, 'RTCPeerConnection', { value: Blocked, configurable: true });
-      Object.defineProperty(window, 'webkitRTCPeerConnection', {
-        value: Blocked,
-        configurable: true,
-      });
-    } catch {
-      // ignore
-    }
-  }
-  function removeWebRTCStub(): void {
-    if (!webrtcStubbed || !realRTC) return;
-    webrtcStubbed = false;
-    try {
-      Object.defineProperty(window, 'RTCPeerConnection', { value: realRTC, configurable: true });
-      Object.defineProperty(window, 'webkitRTCPeerConnection', {
-        value: realRTC,
-        configurable: true,
-      });
-    } catch {
-      // ignore
-    }
-  }
+  // WebRTC is NOT handled here: a stub in this isolated world is invisible to
+  // page scripts. Main sets the IP handling policy on the webContents itself
+  // (see main/stream-mode/webrtcPolicy.ts).
 
   /**
    * A document whose visible content is painted by a PLUGIN (Chromium's PDF
@@ -477,14 +447,12 @@ export function installStreamMasker(host: MaskerHost): void {
       // NEW config (a freshly added custom mask must not paint even once).
       host.beginProtected();
       fullSweep();
-      installWebRTCStub();
       // An unmaskable document keeps its shroud for as long as masking is on
       // (this branch also runs on config CHANGES while enabled: skipping the
       // lift here is what keeps it held across them).
       if (!isUnmaskableDocument()) host.endProtected();
     } else if (wasEnabled) {
       restoreAll();
-      removeWebRTCStub();
       ungateAllFrames();
       // The shroud held over an unmaskable document is lifted only here.
       // endProtected is idempotent (a normal page already lifted at boot);
@@ -515,10 +483,7 @@ export function installStreamMasker(host: MaskerHost): void {
   }
 
   const boot = () => {
-    if (active()) {
-      fullSweep();
-      installWebRTCStub();
-    }
+    if (active()) fullSweep();
     // Unmaskable document (PDF viewer) while masking is on: the shroud stays.
     // The curtain over the navigation then runs out its fail-to-blank timeout
     // rather than revealing plugin-painted content no sweep ever touched.

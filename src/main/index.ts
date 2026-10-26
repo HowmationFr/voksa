@@ -1,6 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { app, Menu, session, shell } from 'electron';
+import { app, Menu, session, shell, webContents } from 'electron';
 import { applyUserAgentOverride } from './ua';
 import {
   createAppWindow,
@@ -12,6 +12,7 @@ import { registerIpcHandlers, wireWindowIpc } from './ipc/handlers';
 import { buildApplicationMenu } from './menu';
 import { getStreamMode } from './stream-mode/StreamModeController';
 import { RecorderWatcher } from './stream-mode/recorderWatcher';
+import { installWebRtcPolicy } from './stream-mode/webrtcPolicy';
 import { getMemorySaver } from './perf/MemorySaverController';
 import { setupChromeWebStore } from './extensions/webstore';
 import {
@@ -61,9 +62,15 @@ import {
   app.setPath('userData', userDataDir);
 }
 
-// Instantiate the Stream Mode controller before whenReady so its WebRTC
-// command-line switch is applied in time.
-getStreamMode();
+// Stream Mode's WebRTC IP policy rides on every webContents from its creation
+// and follows config changes live: installed before any webContents can exist
+// so none is ever born under the permissive default while streaming.
+installWebRtcPolicy({
+  getStreamConfig: () => getStreamMode().getConfig(),
+  onConfigChanged: (cb) => getStreamMode().on('config-changed', cb),
+  onContentsCreated: (cb) => app.on('web-contents-created', (_e, contents) => cb(contents)),
+  allContents: () => webContents.getAllWebContents(),
+});
 
 // CRITICAL for Google login: must run before app.whenReady().
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');

@@ -168,7 +168,7 @@ type Indirection = {
 const INDIRECTIONS: Indirection[] = [
   {
     // CONTENT_MASKS / ACCESS_MASKS cards, rendered via t(card.label),
-    // t(card.description), t(card.demo). 12 cards x 3 fields today.
+    // t(card.description), t(card.demo). 14 cards x 3 fields today.
     file: 'ui/components/pages/StreamPage.tsx',
     extract: (text, rel) => [
       ...fieldStrings(sliceBlock(text, rel, 'const CONTENT_MASKS', /\n\]/g), ['label', 'description', 'demo']),

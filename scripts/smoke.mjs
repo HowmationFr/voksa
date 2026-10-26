@@ -401,7 +401,12 @@ class CdpClient {
 
   static async connect(wsUrl, label) {
     const client = new CdpClient(await openSocket(wsUrl), label);
-    await client.send('Runtime.enable');
+    try {
+      await client.send('Runtime.enable');
+    } catch (err) {
+      client.close(); // callers may retry: never leave a half-open socket behind
+      throw err;
+    }
     return client;
   }
 
@@ -879,17 +884,61 @@ const POPUP_STATE_EXPR = `(() => {
   };
 })()`;
 
-/** Connect to a page target (tab or popup window) by exact URL. */
+/**
+ * A CDP client on the page target (tab or popup window) listed under an exact
+ * URL, that follows that target. A popup is listed under its final URL BEFORE
+ * its document commits, and a connection made in that window can see its
+ * socket close or its target swapped (lived: scenario 27 failed once on Windows
+ * CI with "CDP socket closed (popup level 2)", thrown by the Runtime.enable of
+ * the connection itself). Same discipline as scenario 13: a failed call
+ * re-resolves the target by URL and reconnects when the socket closed or the id
+ * changed, then rethrows. Callers keep their own deadline and their verdicts.
+ */
+class PageClient {
+  constructor(url, label) {
+    this.url = url;
+    this.label = label;
+    this.client = null;
+    this.targetId = null;
+  }
+
+  /** (Re)connect to the target listed under `url`; false while none is. */
+  async attach() {
+    const target = (await listTargets()).find((t) => t.type === 'page' && t.url === this.url);
+    if (!target) return false;
+    if (this.client && !this.client.closed && target.id === this.targetId) return true;
+    const client = await CdpClient.connect(target.webSocketDebuggerUrl, this.label);
+    clients.push(client);
+    this.client?.close();
+    this.client = client;
+    this.targetId = target.id;
+    return true;
+  }
+
+  async evaluate(expression, opts) {
+    try {
+      return await this.client.evaluate(expression, opts);
+    } catch (err) {
+      let followed = '';
+      try {
+        if (!(await this.attach())) followed = `; no page target listed under ${this.url}`;
+      } catch (reconnectErr) {
+        followed = `; reconnect failed: ${reconnectErr.message}`;
+      }
+      throw new Error(`${err.message}${followed}`);
+    }
+  }
+}
+
+/**
+ * Connect to a page target (tab or popup window) by exact URL. A connection
+ * that fails (socket closed under Runtime.enable) is retried like a target not
+ * listed yet, and the last CDP error ends up in the timeout message.
+ */
 async function connectPageTarget(url, label, hint) {
-  const target = await waitFor(
-    `${label} CDP target`,
-    async () => (await listTargets()).find((t) => t.type === 'page' && t.url === url),
-    STEP_TIMEOUT_MS,
-    hint,
-  );
-  const client = await CdpClient.connect(target.webSocketDebuggerUrl, label);
-  clients.push(client);
-  return client;
+  const page = new PageClient(url, label);
+  await waitFor(`${label} CDP target`, () => page.attach(), STEP_TIMEOUT_MS, hint);
+  return page;
 }
 
 /**
@@ -902,15 +951,19 @@ async function connectPageTarget(url, label, hint) {
  * window really is on screen (document.visibilityState), so a gate that kept
  * it hidden forever cannot pass.
  */
-async function awaitMaskedPopup(client, opts) {
+async function awaitMaskedPopup(page, opts) {
   let st = null;
+  let lastSampleError = null;
   const start = Date.now();
   while (Date.now() - start < GUARD_TIMEOUT_MS) {
     if (exited) throw new Error(`electron exited while watching ${opts.label}`);
     try {
-      st = await client.evaluate(POPUP_STATE_EXPR);
-    } catch {
-      // renderer busy / navigating: retry
+      st = await page.evaluate(POPUP_STATE_EXPR);
+    } catch (err) {
+      // Renderer busy / navigating, or socket closed / target swapped (the
+      // PageClient already followed it): not a verdict, sample again. A popup
+      // that never comes back still fails below, on the deadline.
+      lastSampleError = err.message;
       await sleep(100);
       continue;
     }
@@ -952,7 +1005,8 @@ async function awaitMaskedPopup(client, opts) {
   throw new Error(
     `${opts.label} never settled masked${opts.frame ? ', iframe guarded' : ''}` +
       `${opts.openerMarker ? ', opener reachable' : ''}${opts.shown ? ', on screen' : ''} ` +
-      `within ${GUARD_TIMEOUT_MS}ms; last state: ${JSON.stringify(st)}. ${opts.hint}`,
+      `within ${GUARD_TIMEOUT_MS}ms; last state: ${JSON.stringify(st)}` +
+      `${lastSampleError ? `; last sampling error: ${lastSampleError}` : ''}. ${opts.hint}`,
   );
 }
 
@@ -2585,9 +2639,16 @@ async function main() {
     hint: popupHint,
   });
   // The chain is whole end to end: from the grandchild, opener.opener is the TAB
-  // (OAuth flows post their result up exactly this way).
-  const chainRoot = await chain2.evaluate(
-    `(() => { try { return window.opener.opener.document.body.innerText; } catch (e) { return 'ERR:' + e.message; } })()`,
+  // (OAuth flows post their result up exactly this way). Only CDP errors are
+  // retried: whatever value comes back is the verdict, checked below.
+  const { value: chainRoot } = await waitFor(
+    'window.opener.opener from the grandchild popup',
+    async () => ({
+      value: await chain2.evaluate(
+        `(() => { try { return window.opener.opener.document.body.innerText; } catch (e) { return 'ERR:' + e.message; } })()`,
+      ),
+    }),
+    STEP_TIMEOUT_MS,
   );
   if (typeof chainRoot !== 'string' || !chainRoot.includes(CHAIN_OPENER_MARKER)) {
     throw new Error(

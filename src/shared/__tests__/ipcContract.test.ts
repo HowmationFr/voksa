@@ -189,7 +189,9 @@ const mainSends: Usage = new Map(
 // delivery that reaches SUBFRAME preloads; a webContents-level send reaches
 // the main frame alone. The receiver must end in "frame"/"Frame".
 const mainFrameSends = scan(mainFiles, /\b[\w$]*[fF]rame\.send\s*\(\s*IPC\.([A-Z0-9_]+)/g);
-const preloadInvokes = scan(preloadFiles, /ipcRenderer\.invoke\s*\(\s*IPC\.([A-Z0-9_]+)/g);
+// ipcRenderer.invoke(IPC.X directly, or voksaApi's local invoke(IPC.X helper
+// (rejection-only failures, see voksaApi.ts); \binvoke matches both.
+const preloadInvokes = scan(preloadFiles, /\binvoke\s*\(\s*IPC\.([A-Z0-9_]+)/g);
 const preloadSends = scan(preloadFiles, /ipcRenderer\.send(?:Sync)?\s*\(\s*IPC\.([A-Z0-9_]+)/g);
 const preloadSubscribes = scan(preloadFiles, SUBSCRIBE_RE);
 

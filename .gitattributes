@@ -1,0 +1,4 @@
+# patch-package patches are applied byte-for-byte to LF files under node_modules:
+# a CRLF checkout (core.autocrlf on Windows) would write CRLF into every patched
+# file and make a regenerated patch rewrite whole files.
+patches/*.patch text eol=lf

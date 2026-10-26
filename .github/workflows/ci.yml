@@ -1,6 +1,11 @@
-# Pull request and master CI: nothing merges unless EVERYTHING is green on
-# all three OSes (typecheck, lint, unit tests, build, electron-builder
-# packaging without publishing, and a real boot smoke test).
+# Pull request CI: nothing merges unless EVERYTHING is green on all three
+# OSes (typecheck, lint, unit tests, build, electron-builder packaging
+# without publishing, and a real boot smoke test).
+#
+# No run on push to main: main only moves through pull requests, and the
+# branch protection's "up to date" rule means each PR was tested on exactly
+# the tree that lands (the pull_request run checks out the merge with the
+# latest main). Re-running everything after the merge proved nothing new.
 name: CI
 
 on:
@@ -10,8 +15,6 @@ on:
   # queued PR would wait forever for checks that never start. Inert as long
   # as no merge queue is enabled on the branch.
   merge_group:
-  push:
-    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -36,9 +39,10 @@ jobs:
       - name: Unit tests
         run: npm test
 
+  # Runs alongside `checks`, not after it: waiting on lint before starting the
+  # (much longer) OS jobs only stacked the two durations.
   packages:
     name: Build + packaging + smoke (${{ matrix.os }})
-    needs: checks
     strategy:
       fail-fast: false
       matrix:
@@ -50,13 +54,27 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The PR merge commit plus its parents: HEAD^1 is the base branch
+          # tip, which the scope step diffs against.
+          fetch-depth: 2
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
+      # A pure version bump (the release PR) changes no code: every step below
+      # is skipped and the job reports green in seconds. Skipping STEPS, not
+      # the job: a skipped matrix job reports under its unexpanded name and
+      # would leave the required per-OS checks pending forever.
+      - name: Scope (a pure version bump skips the rest)
+        id: scope
+        if: github.event_name == 'pull_request'
+        run: node scripts/version-only-diff.mjs HEAD^1 HEAD
       - name: Install dependencies
+        if: steps.scope.outputs.version_only != 'true'
         run: npm ci
       - name: Build (UI + main)
+        if: steps.scope.outputs.version_only != 'true'
         run: npm run build
       # Ubuntu 24 restricts unprivileged user namespaces (AppArmor), which is
       # what used to force --no-sandbox here. But --no-sandbox silently
@@ -65,22 +83,22 @@ jobs:
       # Lifting the restriction lets Electron run with its real sandbox, the
       # same configuration users get.
       - name: Allow unprivileged user namespaces (Electron sandbox)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.scope.outputs.version_only != 'true'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Boot smoke test (Linux, under Xvfb)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.scope.outputs.version_only != 'true'
         timeout-minutes: 15
         run: xvfb-run -a node scripts/smoke.mjs
       - name: Boot smoke test
-        if: runner.os != 'Linux'
+        if: runner.os != 'Linux' && steps.scope.outputs.version_only != 'true'
         timeout-minutes: 15
         run: node scripts/smoke.mjs
       - name: Package Windows (no publish)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.scope.outputs.version_only != 'true'
         run: npx electron-builder --win --publish never
       - name: Package macOS (no publish, unsigned)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.scope.outputs.version_only != 'true'
         run: npx electron-builder --mac --publish never
       - name: Package Linux (no publish)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.scope.outputs.version_only != 'true'
         run: npx electron-builder --linux --publish never

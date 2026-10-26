@@ -6,6 +6,7 @@
   "default_locale": "en",
   "background": { "service_worker": "sw.js", "type": "module" },
   "permissions": ["activeTab", "alarms", "declarativeNetRequest", "scripting", "storage"],
-  "action": { "default_title": "__MSG_probeTitle__" },
+  "action": { "default_title": "__MSG_probeTitle__", "default_popup": "vault.html" },
+  "web_accessible_resources": [{ "resources": ["vault.html"], "matches": ["<all_urls>"] }],
   "options_page": "probe.html"
 }

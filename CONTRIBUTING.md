@@ -9,7 +9,7 @@ Prerequisites: Node 22.12+, Git. better-sqlite3 ships prebuilt N-API binaries fo
 ```bash
 git clone https://github.com/<your-fork>/voksa.git
 cd voksa
-npm install        # also applies patches/ (patch-package)
+npm install        # also applies patches/ (patch-package; fails if a patch no longer applies)
 npm run dev        # esbuild watch + vite + electron
 ```
 
@@ -45,4 +45,4 @@ Releases are cut by maintainers from `main`: a `vX.Y.Z` tag (derived from the `p
 
 ## License
 
-The project is licensed under **GPL-3.0** (required in particular by the GPL option of `electron-chrome-extensions`). By contributing you agree that your code is distributed under this license.
+The project is licensed under **GPL-3.0**. By contributing you agree that your code is distributed under this license.

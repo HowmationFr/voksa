@@ -2487,16 +2487,36 @@ async function main() {
   //    A stable 'english-probe' means getMessage is stuck on the default
   //    locale again (localized getMessage in the patch, or the Chromium lang
   //    switch in index.ts).
-  await waitFor(
+  const localized = await waitFor(
     'extension i18n resolves the profile language in both realms',
     async () => {
       const r = await contractPage.evaluate(`window.report()`).catch(() => null);
-      return r && r.page.i18nMessage === 'sonde-francaise' && r.sw.i18nMessage === 'sonde-francaise';
+      return r && r.page.i18nMessage === 'sonde-francaise' && r.sw.i18nMessage === 'sonde-francaise'
+        ? r
+        : null;
     },
     STEP_TIMEOUT_MS,
     'getMessage kept answering the default locale: localized getMessage (patch) or the Chromium ' +
       'lang switch (index.ts) broke',
   );
+  //    Chromium's message_bundle semantics: names are case-insensitive, and so
+  //    are $placeholder$ names (lowercase in the fixture, like Chrome's docs).
+  if (localized.page.i18nCase !== 'casse-francaise') {
+    throw new Error(
+      `getMessage('PROBECASE') gave ${J(localized.page.i18nCase)}: message names must be case-insensitive (patch, localized getMessage)`,
+    );
+  }
+  if (localized.page.i18nPlaceholder !== 'bonjour monde et x') {
+    throw new Error(
+      `getMessage('probePlaceholder', ['x']) gave ${J(localized.page.i18nPlaceholder)}: $who$ / $1 substitution broke (patch, localized getMessage)`,
+    );
+  }
+  // 6. Event objects: removeListener / hasListener work (patched ExtensionEvent).
+  if (localized.page.events?.had !== true || localized.page.events?.after !== false) {
+    throw new Error(
+      `storage.onChanged has/removeListener misbehave: ${J(localized.page.events)} (patch, ExtensionEvent listener set)`,
+    );
+  }
   const contractTabs = await ui.evaluate(`window.voksa.tabs.list()`);
   const contractTab = (contractTabs ?? []).find((t) => (t.url ?? '').includes(contractId));
   if (contractTab) await ui.evaluate(`window.voksa.tabs.close(${J(contractTab.id)})`);

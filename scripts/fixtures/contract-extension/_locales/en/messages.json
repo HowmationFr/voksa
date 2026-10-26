@@ -1,4 +1,9 @@
 {
   "probeTitle": { "message": "Contract probe" },
-  "probeMessage": { "message": "english-probe" }
+  "probeMessage": { "message": "english-probe" },
+  "probeCase": { "message": "english-case" },
+  "probePlaceholder": {
+    "message": "hello $who$ and $1",
+    "placeholders": { "who": { "content": "world" } }
+  }
 }

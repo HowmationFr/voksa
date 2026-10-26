@@ -12,6 +12,22 @@ window.report = async () => {
       tabsWithUrl: tabs.filter((t) => typeof t.url === 'string' && t.url.length > 0).length,
       openOptionsPage: typeof browser.runtime.openOptionsPage,
       i18nMessage: browser.i18n.getMessage('probeMessage'),
+      // Chromium resolves message AND placeholder names case-insensitively.
+      i18nCase: browser.i18n.getMessage('PROBECASE'),
+      i18nPlaceholder: browser.i18n.getMessage('probePlaceholder', ['x']),
+      // chrome.* events must honor removeListener / hasListener (the patched
+      // storage.onChanged used to throw on hasListener and never remove).
+      events: (() => {
+        try {
+          const fn = () => {};
+          browser.storage.onChanged.addListener(fn);
+          const had = browser.storage.onChanged.hasListener(fn);
+          browser.storage.onChanged.removeListener(fn);
+          return { had, after: browser.storage.onChanged.hasListener(fn) };
+        } catch (e) {
+          return { error: String(e) };
+        }
+      })(),
     },
     sw: swReport,
   };

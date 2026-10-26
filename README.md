@@ -150,6 +150,7 @@ Voksa works the other way around: because it IS the browser, pages are kept invi
 | Frame-by-frame VOD scrubbing | Recovers transition frames | **Nothing to recover** |
 | Browser UI (tabs, address bar, suggestions) | Untouchable by extensions | **Masked too** |
 | Store pages, internal pages, PDF viewer | Extensions are blocked there | **Covered** |
+| Other extensions' popups (your password manager's vault) | Extensions are blocked there | **Covered** |
 | Starts with your recorder | No idea OBS exists | **Auto-arms with OBS, Streamlabs, XSplit, vMix** |
 | The screen-share picker | Chromium's, raw thumbnails | **Voksa's own, masked before delivery** |
 | Background tab starts blasting music | Nothing | **Auto-muted while live** |

@@ -117,6 +117,10 @@ export const IPC = {
   STREAM_FRAME_ALIVE: 'stream:frameAlive',
   STREAM_FRAME_GATE: 'stream:frameGate',
   STREAM_FRAMES_STATUS: 'stream:framesStatus',
+  // Asked synchronously by the extension-popup session preload at
+  // document-start: is this webContents an extension action popup (created by
+  // the library with no preload), so that it must run the page preload itself?
+  STREAM_EXT_POPUP_PRELOAD_SYNC: 'stream:extPopupPreloadSync',
 
   // Per-tab audio output routing (DMCA Audio Guard stage 2). The route is a
   // device LABEL (deviceIds are origin-hashed, see shared/audioRouting.ts):

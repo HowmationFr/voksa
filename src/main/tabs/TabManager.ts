@@ -1,7 +1,13 @@
-import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { app, BaseWindow, webContents, type WebContents, type WebFrameMain } from 'electron';
+import {
+  BaseWindow,
+  webContents,
+  type BrowserWindow,
+  type WebContents,
+  type WebFrameMain,
+} from 'electron';
 import { Tab, teardownView } from './Tab';
+import { pagePreloadPath, popupWebPreferences } from './pageSurface';
 import { IPC } from '../../shared/ipcChannels';
 import type { ChromeBounds, TabState } from '../../shared/types';
 import type { TabSnapshot } from '../../shared/memorySaver';
@@ -15,6 +21,7 @@ import { sameMaskingConfig, type StreamModeConfig } from '../../shared/streamCon
 import { getStreamMode } from '../stream-mode/StreamModeController';
 import { CurtainController, isInternalUrl } from '../stream-mode/curtain';
 import { FrameGuard } from '../stream-mode/frameGuard';
+import { ExtensionPopupGate } from '../stream-mode/extensionPopupGate';
 import {
   getUaForUrl,
   isAnyGoogleDomain,
@@ -41,6 +48,15 @@ export class TabManager extends EventEmitter {
    * preload-less subframes (electron/electron#34727).
    */
   private readonly frameGuards = new Map<number, FrameGuard>();
+  /**
+   * Live page windows that are not tabs, keyed by webContents id, mapped to the
+   * tab whose page opened them: window.open popups at ANY depth (a popup opened
+   * from a popup belongs to the tab at the root of the chain), and extension
+   * windows adopted into this window (null: no opener tab).
+   */
+  private readonly popupOwners = new Map<number, string | null>();
+  /** Stream Mode show gates of extension action popups, by webContents id. */
+  private readonly popupGates = new Map<number, ExtensionPopupGate>();
   /** Kept so dispose() can unsubscribe from the stream controller singleton. */
   private readonly onStreamConfigChanged: (cfg: StreamModeConfig) => void;
   /**
@@ -131,13 +147,14 @@ export class TabManager extends EventEmitter {
     }
     this.tabs.length = 0;
     this.activeId = null;
-    // Managed popups (window.open / OAuth) are independent BrowserWindows,
-    // guarded from HERE (they run the page preload). They cannot outlive this
-    // window: their opener tab is destroyed just above, so window.opener is
-    // dead and the flow is over anyway, while an orphaned guard would leave
-    // every iframe the popup inserts under Stream Mode gated forever (fails
-    // closed, but the popup would be visibly broken) since no window would
-    // own its frame messages any more.
+    // Managed popups (window.open / OAuth, at any depth) are independent
+    // BrowserWindows, guarded from HERE (they run the page preload). They
+    // cannot outlive this window: their opener tab is destroyed just above, so
+    // window.opener is dead and the flow is over anyway, while an orphaned
+    // guard would leave every iframe the popup inserts under Stream Mode gated
+    // forever (fails closed, but the popup would be visibly broken) since no
+    // window would own its frame messages any more. The extension windows
+    // adopted here go with it for that same last reason.
     for (const [wcId, guard] of this.frameGuards) {
       if (!tabWebContentsIds.has(wcId)) {
         const popup = webContents.fromId(wcId);
@@ -180,6 +197,89 @@ export class TabManager extends EventEmitter {
   /** A frame announced its preload (IPC.STREAM_FRAME_ALIVE). */
   handleFrameAlive(sender: WebContents, frame: WebFrameMain | null): void {
     this.frameGuards.get(sender.id)?.onFrameAlive(frame);
+    this.popupGates.get(sender.id)?.onFrameAlive(frame);
+  }
+
+  /**
+   * The ONE window-open policy of every page surface this manager owns: tabs,
+   * window.open popups at any depth, adopted extension windows. Tab-like
+   * dispositions become tabs; a real popup (OAuth / SSO / postMessage flows) is
+   * allowed so window.opener survives, but it runs OUR preload so the masker,
+   * the shroud and the webdriver patch apply just like in a tab, and it is
+   * wired by wirePopup() through the opener's 'did-create-window'.
+   */
+  private readonly handleWindowOpen = ({
+    url,
+    disposition,
+  }: Electron.HandlerDetails): Electron.WindowOpenHandlerResponse => {
+    if (disposition === 'foreground-tab' || disposition === 'background-tab') {
+      this.create(url, { activate: disposition !== 'background-tab' });
+      return { action: 'deny' };
+    }
+    if (disposition === 'new-window') {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          webPreferences: popupWebPreferences(),
+          autoHideMenuBar: true,
+        },
+      };
+    }
+    return { action: 'deny' };
+  };
+
+  /**
+   * Wire a page window that is not a tab: Stream Mode frame guard (before its
+   * first document can announce anything), UA routing, Google-auth flag, the
+   * shared window-open policy, and the same wiring for whatever IT opens, so a
+   * popup opened from a popup is never a bare BrowserWindow (Electron hands a
+   * child neither the opener's preload nor its handlers).
+   */
+  private wirePopup(popup: BrowserWindow, ownerTabId: string | null, initialUrl?: string): void {
+    const pwc = popup.webContents;
+    const id = pwc.id;
+    this.popupOwners.set(id, ownerTabId);
+    pwc.once('destroyed', () => this.popupOwners.delete(id));
+    this.guard(pwc);
+    // A load the caller is about to issue (loadURL) fires no will-navigate:
+    // route its UA, and its Google-auth flag, here.
+    const firstUrl = initialUrl || pwc.getURL() || 'about:blank';
+    if (isGoogleAuthDomain(firstUrl, id)) setInGoogleAuthFlow(id, true);
+    pwc.setUserAgent(getUaForUrl(firstUrl, id));
+    pwc.on('will-navigate', (_e, url) => {
+      if (isGoogleAuthDomain(url, id)) setInGoogleAuthFlow(id, true);
+      pwc.setUserAgent(getUaForUrl(url, id));
+    });
+    pwc.setWindowOpenHandler(this.handleWindowOpen);
+    pwc.on('did-create-window', (child) => this.wirePopup(child, ownerTabId));
+  }
+
+  /**
+   * Adopt a chrome.windows.create popup (extensions/webstore.ts): it runs the
+   * page preload, so it needs a guard and IPC routing like a window.open popup.
+   * Call BEFORE its first load, with the URL that load is for.
+   */
+  adoptPopup(popup: BrowserWindow, url?: string): void {
+    this.wirePopup(popup, null, url);
+  }
+
+  /**
+   * Adopt an extension ACTION popup (created by electron-chrome-extensions
+   * without our preload; extensionPopup.ts supplies it): frame guard and IPC
+   * routing, plus the show gate that keeps it off screen under Stream Mode
+   * until its document proved it runs the page preload.
+   */
+  adoptExtensionPopup(popup: BrowserWindow): void {
+    const id = popup.webContents.id;
+    if (this.popupGates.has(id)) return;
+    this.guard(popup.webContents);
+    this.popupGates.set(id, new ExtensionPopupGate(popup, () => this.popupGates.delete(id)));
+  }
+
+  /** A window.open chain rooted in this tab is still open (its opener must live). */
+  private hasOpenPopup(tabId: string): boolean {
+    for (const owner of this.popupOwners.values()) if (owner === tabId) return true;
+    return false;
   }
 
   /** A frame gated its iframes and wants a coverage verdict (IPC.STREAM_FRAME_GATE). */
@@ -203,10 +303,6 @@ export class TabManager extends EventEmitter {
     await this.curtain.raise(tab.id, tab.view, kind);
   }
 
-  private preloadPath(): string {
-    return path.join(app.getAppPath(), 'dist-electron', 'preload', 'page.js');
-  }
-
   create(
     url?: string,
     opts?: { activate?: boolean; title?: string; deferLoad?: boolean; pinned?: boolean },
@@ -216,7 +312,7 @@ export class TabManager extends EventEmitter {
       url: normalized,
       title: opts?.title,
       userAgent: this.userAgent,
-      preloadPath: this.preloadPath(),
+      preloadPath: pagePreloadPath(),
       deferLoad: opts?.deferLoad,
     });
     if (opts?.pinned) tab.pinned = true;
@@ -465,6 +561,10 @@ export class TabManager extends EventEmitter {
     if (tab.isDiscarded || tab.isInternal) return false;
     if (tab.id === this.activeId) return false;
     if (this.reviving.has(tab.id)) return false;
+    // Never the opener of a live popup chain: Electron closes a child window
+    // with its opener, so freeing the tab would kill a sign-in popup mid-flow
+    // (and window.opener with it, which is what the flow talks to).
+    if (this.hasOpenPopup(tab.id)) return false;
     const wc = tab.view?.webContents;
     if (!wc || wc.isDestroyed()) return false;
 
@@ -604,6 +704,7 @@ export class TabManager extends EventEmitter {
       isDiscarded: t.isDiscarded,
       isLoading: t.isLoading,
       hasCurtain: this.curtain.isActive(t.id),
+      hasOpenPopup: this.hasOpenPopup(t.id),
       host: t.host().toLowerCase(),
     }));
   }
@@ -981,53 +1082,13 @@ export class TabManager extends EventEmitter {
       });
     };
 
-    wc.setWindowOpenHandler(({ url, disposition }) => {
-      if (disposition === 'foreground-tab' || disposition === 'background-tab') {
-        this.create(url, { activate: disposition !== 'background-tab' });
-        return { action: 'deny' };
-      }
-      if (disposition === 'new-window') {
-        // Real popup (OAuth / SSO / postMessage flows): allow it so
-        // window.opener survives, but run OUR preload so the masker + shroud +
-        // webdriver patch apply just like a tab.
-        return {
-          action: 'allow',
-          overrideBrowserWindowOptions: {
-            webPreferences: {
-              preload: this.preloadPath(),
-              contextIsolation: true,
-              sandbox: true,
-              nodeIntegration: false,
-              nodeIntegrationInSubFrames: true,
-              // Same as Tab.createView: a popup landing on a PDF should render
-              // it, not download it.
-              plugins: true,
-            },
-            autoHideMenuBar: true,
-          },
-        };
-      }
-      return { action: 'deny' };
-    });
+    wc.setWindowOpenHandler(this.handleWindowOpen);
 
-    // Wire UA spoofing + tab routing onto managed popups.
-    on('did-create-window', ((popup: Electron.BrowserWindow) => {
-      const pwc = popup.webContents;
-      // Popups run the page preload (OAuth flows keep window.opener), so they
-      // get the same Stream Mode protections, frame guard included.
-      this.guard(pwc);
-      pwc.setUserAgent(getUaForUrl(pwc.getURL() || 'about:blank', pwc.id));
-      pwc.on('will-navigate', (_e, url) => {
-        if (isGoogleAuthDomain(url, pwc.id)) setInGoogleAuthFlow(pwc.id, true);
-        pwc.setUserAgent(getUaForUrl(url, pwc.id));
-      });
-      pwc.setWindowOpenHandler(({ url, disposition }) => {
-        if (disposition === 'foreground-tab' || disposition === 'background-tab') {
-          this.create(url, { activate: disposition !== 'background-tab' });
-          return { action: 'deny' };
-        }
-        return { action: 'allow' };
-      });
+    // Popups run the page preload (OAuth flows keep window.opener), so they
+    // get the same Stream Mode protections, frame guard included, at every
+    // depth of the chain this tab roots.
+    on('did-create-window', ((popup: BrowserWindow) => {
+      this.wirePopup(popup, tab.id);
     }) as (...args: never[]) => void);
 
     on('will-navigate', ((_event: unknown, url: string) => {

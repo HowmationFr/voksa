@@ -7,7 +7,8 @@
 //   4. REAL PAGE LOADS: a tab opened via voksa.tabs.create renders a local
 //      leak-probe page (email + public IP + same-origin iframe), stream OFF.
 //   5. FINGERPRINT: navigator.webdriver undefined, window.chrome present,
-//      Chrome UA without Electron/Firefox/Voksa markers.
+//      Chrome UA without Electron/Firefox/Voksa markers, and no Chrome Web
+//      Store API (electronWebstore...) on a non-store page or its iframe.
 //   6. STREAM MASKS LIVE PAGES: enabling Stream Mode scrubs the email/IP from
 //      the live DOM (top document AND iframe) without leaving the page
 //      shrouded (documentElement opacity back to 1).
@@ -77,7 +78,23 @@
 //  24. GO-LIVE PREFLIGHT: a tab whose title carries an email is flagged (with
 //      a MASKED preview), a clean profile flags nothing (anti-vacuity), and
 //      the flag names a real tab id.
-//  25. NO RENDERER EXCEPTIONS: no Runtime.exceptionThrown on the chrome UI
+//  25. AUDIO ROUTING: a per-tab output route reaches every audio source of
+//      the page, or is cleared (fail-visible) when it cannot resolve.
+//  26. EXTENSION CONTRACT: the fixture extension's service worker, browser
+//      namespace, tabs.query, storage.onChanged relay and i18n all hold.
+//  27. POPUP CHAIN UNDER STREAM: a popup opened from a popup (window.open at
+//      depth 2) runs the page preload like a tab: loaded under Stream Mode it
+//      is never visible raw, ends up masked and unshrouded, its iframe is
+//      guarded (masked AND visible), and window.opener still reaches the
+//      parent popup and, through it, the tab. Stream OFF restores it and ON
+//      re-masks it. Memory Saver refuses to free the opener tab while the
+//      chain is open, and frees it again once the chain is closed.
+//  28. EXTENSION WINDOWS UNDER STREAM: an extension's chrome.windows.create
+//      popup (extension page AND web page) and its toolbar action popup (a
+//      window electron-chrome-extensions builds with no preload of its own)
+//      are masked like a tab, never visible raw, and the extension API still
+//      works inside them.
+//  29. NO RENDERER EXCEPTIONS: no Runtime.exceptionThrown on the chrome UI
 //      target during the whole run.
 //
 // Catches boot crashes, preload failures, a blank chrome UI, a broken voksa
@@ -127,6 +144,20 @@ const POISON_EMAIL = 'poisoned-leak@example.com';
 const POISON_IP = '203.0.113.9';
 const CLEAN_FRAME_MARKER = 'CLEAN-FRAME-LOADED';
 const CLEAN_FRAME_EMAIL = 'clean-frame@example.com';
+
+// Scenarios 27-28 (popup chain, extension windows). Same rule: markers are
+// unmaskable, emails are what Stream Mode must scrub.
+const CHAIN_OPENER_MARKER = 'CHAIN-OPENER-LOADED';
+const CHAIN1_MARKER = 'CHAIN-POPUP-1-LOADED';
+const CHAIN1_EMAIL = 'popup-one@example.com';
+const CHAIN2_MARKER = 'CHAIN-POPUP-2-LOADED';
+const CHAIN2_EMAIL = 'popup-two@example.com';
+const CHAIN_FRAME_MARKER = 'CHAIN-FRAME-LOADED';
+const CHAIN_FRAME_EMAIL = 'popup-frame@example.com';
+// Kept in sync with scripts/fixtures/contract-extension/vault.html.
+const VAULT_MARKER = 'VAULT-PAGE-LOADED';
+const VAULT_EMAIL = 'vault-entry@example.com';
+const EXT_FRAME_HOST_MARKER = 'EXT-FRAME-HOST-LOADED';
 
 // Scenarios 18-19 (auth + TLS). Markers are unmaskable by construction.
 const AUTH_USER = 'smokeuser';
@@ -519,6 +550,26 @@ function startProbeServer() {
         window.__earlyAudio.play().catch(function () {});
       </script>
     </body></html>`,
+    // Scenarios 27-28: a tab that opens a popup, which opens a popup. Each
+    // popup level carries an email and a same-origin iframe (the frame guard
+    // must vouch for it, or the masker keeps it hidden).
+    '/chain-opener.html': `<!doctype html><html><head><meta charset="utf-8"><title>chain</title></head><body>
+      <p>${CHAIN_OPENER_MARKER}</p>
+    </body></html>`,
+    '/chain-1.html': `<!doctype html><html><head><meta charset="utf-8"><title>chain 1</title></head><body>
+      <p>${CHAIN1_MARKER}</p>
+      <p>popup contact: ${CHAIN1_EMAIL}</p>
+      <iframe id="f" src="/chain-frame.html"></iframe>
+    </body></html>`,
+    '/chain-2.html': `<!doctype html><html><head><meta charset="utf-8"><title>chain 2</title></head><body>
+      <p>${CHAIN2_MARKER}</p>
+      <p>popup contact: ${CHAIN2_EMAIL}</p>
+      <iframe id="f" src="/chain-frame.html"></iframe>
+    </body></html>`,
+    '/chain-frame.html': `<!doctype html><html><head><meta charset="utf-8"></head><body>
+      <p>${CHAIN_FRAME_MARKER}</p>
+      <p>frame contact: ${CHAIN_FRAME_EMAIL}</p>
+    </body></html>`,
   };
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, 'http://x').pathname;
@@ -527,6 +578,24 @@ function startProbeServer() {
     // tabs lack `plugins: true` this becomes a download instead of a page.
     if (pathname === '/doc.pdf') {
       res.writeHead(200, { 'Content-Type': 'application/pdf' }).end(tinyPdf());
+      return;
+    }
+
+    // Scenario 28 (d): a web page embedding an extension page (a password
+    // manager's inline menu does exactly this). The extension id only exists
+    // at runtime, hence a query parameter rather than a static page.
+    if (pathname === '/ext-frame.html') {
+      const id = new URL(req.url, 'http://x').searchParams.get('id') ?? '';
+      if (!/^[a-p]{32}$/.test(id)) {
+        res.writeHead(400).end('bad extension id');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(
+        `<!doctype html><html><head><meta charset="utf-8"><title>ext frame</title></head><body>
+          <p>${EXT_FRAME_HOST_MARKER}</p>
+          <iframe id="f" src="chrome-extension://${id}/vault.html?surface=iframe"></iframe>
+        </body></html>`,
+      );
       return;
     }
 
@@ -784,6 +853,119 @@ async function awaitGuardedPoisonPage(poisonPage, phase) {
   );
 }
 
+// Snapshot of a popup window document (scenarios 27-28). Same discipline as the
+// poison snapshot above: the iframe's contentDocument is read only once the top
+// document is complete (reading it earlier is the #34727 trigger itself), and
+// its visibility goes through computed style AND the L0 shroud.
+const POPUP_STATE_EXPR = `(() => {
+  const docOpacity = getComputedStyle(document.documentElement).opacity;
+  const shrouded = Number(docOpacity) === 0;
+  const ready = document.readyState === 'complete';
+  const f = document.getElementById('f');
+  let frameText = null;
+  let frameVisible = false;
+  if (ready && f) {
+    try {
+      frameText = f.contentDocument && f.contentDocument.body ? f.contentDocument.body.textContent : null;
+    } catch (e) { frameText = 'ERR:' + e.message; }
+    const cs = getComputedStyle(f);
+    const r = f.getBoundingClientRect();
+    frameVisible = !shrouded && cs.visibility === 'visible' && cs.display !== 'none' &&
+      Number(cs.opacity) !== 0 && r.width > 0 && r.height > 0;
+  }
+  let opener = null;
+  try {
+    opener = window.opener ? (window.opener.document.body ? window.opener.document.body.innerText : '') : null;
+  } catch (e) { opener = 'ERR:' + e.message; }
+  return {
+    body: document.body ? document.body.innerText : '',
+    docOpacity,
+    shrouded,
+    frameText,
+    frameVisible,
+    opener,
+    visibility: document.visibilityState,
+    url: location.href,
+  };
+})()`;
+
+/** Connect to a page target (tab or popup window) by exact URL. */
+async function connectPageTarget(url, label, hint) {
+  const target = await waitFor(
+    `${label} CDP target`,
+    async () => (await listTargets()).find((t) => t.type === 'page' && t.url === url),
+    STEP_TIMEOUT_MS,
+    hint,
+  );
+  const client = await CdpClient.connect(target.webSocketDebuggerUrl, label);
+  clients.push(client);
+  return client;
+}
+
+/**
+ * Poll a popup document loaded under Stream Mode until it is masked AND
+ * revealed, failing on the FIRST observation of raw text a viewer could see
+ * (top document unshrouded, or a visible iframe). `opts.frame` asserts the
+ * page's iframe ends up masked AND visible, which only a frame guard verdict on
+ * that very webContents allows; `opts.openerMarker` that window.opener reaches
+ * the expected document (null: that there is no opener); `opts.shown` that the
+ * window really is on screen (document.visibilityState), so a gate that kept
+ * it hidden forever cannot pass.
+ */
+async function awaitMaskedPopup(client, opts) {
+  let st = null;
+  const start = Date.now();
+  while (Date.now() - start < GUARD_TIMEOUT_MS) {
+    if (exited) throw new Error(`electron exited while watching ${opts.label}`);
+    try {
+      st = await client.evaluate(POPUP_STATE_EXPR);
+    } catch {
+      // renderer busy / navigating: retry
+      await sleep(100);
+      continue;
+    }
+    // THE GUARANTEE, top document and iframe alike. Fail on the first sighting.
+    if (!st.shrouded && st.body.includes(opts.email)) {
+      throw new Error(
+        `ZERO-FRAME LEAK (${opts.label}): the document is unshrouded while showing raw ${opts.email}. ` +
+          `state: ${JSON.stringify(st)}. ${opts.hint}`,
+      );
+    }
+    if (
+      opts.frame &&
+      st.frameVisible &&
+      typeof st.frameText === 'string' &&
+      st.frameText.includes(CHAIN_FRAME_EMAIL)
+    ) {
+      throw new Error(
+        `ZERO-FRAME LEAK (${opts.label}): its iframe is visible while showing raw ${CHAIN_FRAME_EMAIL}. ` +
+          `state: ${JSON.stringify(st)}. ${opts.hint}`,
+      );
+    }
+    const topOk =
+      st.body.includes(opts.marker) && !st.body.includes(opts.email) && st.docOpacity === '1';
+    const frameOk =
+      !opts.frame ||
+      (typeof st.frameText === 'string' &&
+        st.frameText.includes(CHAIN_FRAME_MARKER) &&
+        !st.frameText.includes(CHAIN_FRAME_EMAIL) &&
+        st.frameVisible);
+    const openerOk =
+      opts.openerMarker === undefined ||
+      (opts.openerMarker === null
+        ? st.opener === null
+        : typeof st.opener === 'string' && st.opener.includes(opts.openerMarker));
+    const shownOk = !opts.shown || st.visibility === 'visible';
+    if (topOk && frameOk && openerOk && shownOk) return st;
+    await sleep(100);
+  }
+  throw new Error(
+    `${opts.label} never settled masked${opts.frame ? ', iframe guarded' : ''}` +
+      `${opts.openerMarker ? ', opener reachable' : ''}${opts.shown ? ', on screen' : ''} ` +
+      `within ${GUARD_TIMEOUT_MS}ms; last state: ${JSON.stringify(st)}. ${opts.hint}`,
+  );
+}
+
 const clients = [];
 let probeServer = null;
 let tlsServer = null;
@@ -929,6 +1111,10 @@ async function main() {
     webdriver: typeof navigator.webdriver === 'undefined' ? 'undefined' : String(navigator.webdriver),
     chrome: !!window.chrome,
     ua: navigator.userAgent,
+    webstoreApi: [window, ...Array.from(window.frames)].flatMap((w) =>
+      ['electronWebstore', 'electronRuntime', 'electronManagement'].filter((k) => k in w),
+    ),
+    frames: window.frames.length,
   })`);
   if (fp.webdriver !== 'undefined') {
     throw new Error(
@@ -940,6 +1126,18 @@ async function main() {
   }
   if (!fp.ua.includes('Chrome/') || /Electron|Firefox|Voksa/.test(fp.ua)) {
     throw new Error(`user agent leaks the embedded browser: "${fp.ua}"; check src/main/ua.ts`);
+  }
+  // The store preload runs in every frame of the session; only the exact
+  // https://chromewebstore.google.com origin may get its install/uninstall
+  // API (patches/electron-chrome-web-store+0.13.0.patch). The probe iframe is
+  // same-origin, so it is checked too (frames >= 1 keeps that honest).
+  if (fp.frames < 1) {
+    throw new Error('probe page has no iframe; the Web Store API check would skip subframes');
+  }
+  if (fp.webstoreApi.length > 0) {
+    throw new Error(
+      `a non-store page got the Chrome Web Store API (${fp.webstoreApi.join(', ')}); check patches/electron-chrome-web-store+0.13.0.patch`,
+    );
   }
   pass('FINGERPRINT');
 
@@ -2546,7 +2744,349 @@ async function main() {
   if (contractTab) await ui.evaluate(`window.voksa.tabs.close(${J(contractTab.id)})`);
   pass('EXTENSION CONTRACT');
 
-  // --- 27. NO RENDERER EXCEPTIONS -------------------------------------------------
+  // --- 27. POPUP CHAIN UNDER STREAM -------------------------------------------------
+  // A sign-in popup that opens a popup of its own (an SSO hopping through a
+  // second provider, a "connect your account" step). Electron hands a child
+  // window neither its opener's preload nor its handlers, so every level of the
+  // chain must be wired explicitly (TabManager.handleWindowOpen / wirePopup):
+  // without that the grandchild paints raw under Stream Mode, iframes included.
+  // Loaded with Stream Mode ALREADY ON: nothing may ever paint raw, at any depth.
+  const chainOpenerUrl = `${probe.origin}/chain-opener.html`;
+  const chain1Url = `${probe.origin}/chain-1.html`;
+  const chain2Url = `${probe.origin}/chain-2.html`;
+  const popupHint =
+    'every window.open level must get popupWebPreferences() (page preload, nodeIntegrationInSubFrames, ' +
+    'sandbox) and a frame guard: see TabManager.handleWindowOpen / wirePopup';
+  await ui.evaluate(`window.voksa.stream.update({ enabled: true })`);
+  const chainTabId = await ui.evaluate(`window.voksa.tabs.create(${J(chainOpenerUrl)})`);
+  const chainOpener = await connectPageTarget(
+    chainOpenerUrl,
+    'popup chain opener tab',
+    'the tab never navigated to the chain opener page',
+  );
+  await waitFor(
+    'popup chain opener tab ready',
+    async () =>
+      chainOpener.evaluate(
+        `document.readyState === 'complete' && document.body.innerText.includes(${J(CHAIN_OPENER_MARKER)})`,
+      ),
+    STEP_TIMEOUT_MS,
+  );
+
+  // Level 1: a real popup (features => disposition 'new-window').
+  const opened1 = await chainOpener.evaluate(
+    `!!window.open(${J(chain1Url)}, 'voksa-chain-1', 'popup,width=560,height=440')`,
+    { userGesture: true },
+  );
+  if (opened1 !== true) throw new Error('window.open from the tab was refused (returned null)');
+  const chain1 = await connectPageTarget(
+    chain1Url,
+    'popup level 1',
+    'window.open(new-window) from a tab produced no popup (TabManager.handleWindowOpen)',
+  );
+  await awaitMaskedPopup(chain1, {
+    label: 'popup level 1',
+    marker: CHAIN1_MARKER,
+    email: CHAIN1_EMAIL,
+    frame: true,
+    openerMarker: CHAIN_OPENER_MARKER,
+    hint: popupHint,
+  });
+
+  // Level 2: the same, opened FROM the popup. This is the level that used to be
+  // a bare BrowserWindow (no preload, no guard).
+  const opened2 = await chain1.evaluate(
+    `!!window.open(${J(chain2Url)}, 'voksa-chain-2', 'popup,width=560,height=440')`,
+    { userGesture: true },
+  );
+  if (opened2 !== true) throw new Error('window.open from a popup was refused (returned null)');
+  const chain2 = await connectPageTarget(
+    chain2Url,
+    'popup level 2',
+    'window.open(new-window) from a popup produced no window (TabManager.wirePopup)',
+  );
+  await awaitMaskedPopup(chain2, {
+    label: 'popup level 2 (opened from a popup)',
+    marker: CHAIN2_MARKER,
+    email: CHAIN2_EMAIL,
+    frame: true,
+    openerMarker: CHAIN1_MARKER,
+    hint: popupHint,
+  });
+  // The chain is whole end to end: from the grandchild, opener.opener is the TAB
+  // (OAuth flows post their result up exactly this way).
+  const chainRoot = await chain2.evaluate(
+    `(() => { try { return window.opener.opener.document.body.innerText; } catch (e) { return 'ERR:' + e.message; } })()`,
+  );
+  if (typeof chainRoot !== 'string' || !chainRoot.includes(CHAIN_OPENER_MARKER)) {
+    throw new Error(
+      `window.opener.opener from the grandchild popup does not reach the tab (got ${J(chainRoot)}): ` +
+        'opener and child must stay same-process scriptable (both sandboxed, see popupWebPreferences)',
+    );
+  }
+
+  // It is the real masker, not a one-way scrub: stream OFF restores the
+  // grandchild (iframe included), and toggling ON over the raw page masks it
+  // again through the toggle path rather than the load path.
+  await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  await waitFor(
+    'stream OFF restores the grandchild popup and its iframe',
+    async () => {
+      const st = await chain2.evaluate(POPUP_STATE_EXPR);
+      return (
+        st.body.includes(CHAIN2_EMAIL) &&
+        st.docOpacity === '1' &&
+        typeof st.frameText === 'string' &&
+        st.frameText.includes(CHAIN_FRAME_EMAIL) &&
+        st.frameVisible
+      );
+    },
+    STREAM_TIMEOUT_MS,
+    'the grandchild popup did not get its original text back on stream OFF',
+  );
+  await ui.evaluate(`window.voksa.stream.update({ enabled: true })`);
+  await waitFor(
+    'stream toggled ON re-masks the grandchild popup and its iframe',
+    async () => {
+      const st = await chain2.evaluate(POPUP_STATE_EXPR);
+      return (
+        !st.body.includes(CHAIN2_EMAIL) &&
+        st.docOpacity === '1' &&
+        typeof st.frameText === 'string' &&
+        st.frameText.includes(CHAIN_FRAME_MARKER) &&
+        !st.frameText.includes(CHAIN_FRAME_EMAIL)
+      );
+    },
+    STREAM_TIMEOUT_MS,
+    'toggling Stream Mode ON over the grandchild popup did not mask it again',
+  );
+
+  // Memory Saver must not free the tab at the root of a live chain: Electron
+  // closes a child window with its opener, which would kill the flow mid-way.
+  const parkTabId = await ui.evaluate(`window.voksa.tabs.create('voksa://newtab')`);
+  const refused = await ui.evaluate(`window.voksa.tabs.discard(${J(chainTabId)})`);
+  if (refused !== false) {
+    throw new Error(
+      `Memory Saver discarded the opener tab of a live popup chain (discard returned ${J(refused)}): ` +
+        'the popups die with it (TabManager.discard must refuse while hasOpenPopup)',
+    );
+  }
+  if (!(await listTargets()).some((t) => t.type === 'page' && t.url === chain2Url)) {
+    throw new Error('the grandchild popup disappeared although the discard was refused');
+  }
+  // Anti-vacuity: the refusal was about the chain. Once it is closed, the very
+  // same background tab is discardable again.
+  await chain2.evaluate(`setTimeout(() => window.close(), 0), true`);
+  await chain1.evaluate(`setTimeout(() => window.close(), 0), true`);
+  await waitFor(
+    'popup chain closed',
+    async () =>
+      !(await listTargets()).some(
+        (t) => t.type === 'page' && (t.url === chain1Url || t.url === chain2Url),
+      ),
+    STEP_TIMEOUT_MS,
+    'window.close() did not tear the popups down',
+  );
+  await waitFor(
+    'the opener tab is discardable once its popups are gone',
+    async () => (await ui.evaluate(`window.voksa.tabs.discard(${J(chainTabId)})`)) === true,
+    STEP_TIMEOUT_MS,
+    'discard still refused with no popup left: popupOwners is not cleaned up on popup destruction',
+  );
+  await ui.evaluate(`window.voksa.tabs.close(${J(chainTabId)})`);
+  await ui.evaluate(`window.voksa.tabs.close(${J(parkTabId)})`);
+  await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  pass('POPUP CHAIN UNDER STREAM');
+
+  // --- 28. EXTENSION WINDOWS UNDER STREAM -------------------------------------------
+  // An extension page shows what a site would (a password manager's vault, a
+  // mail notifier's inbox), in windows that are not tabs: chrome.windows.create
+  // popups (our createWindow) and toolbar action popups (built by
+  // electron-chrome-extensions with NO preload; the session preload
+  // src/preload/extensionPopup.ts supplies it and stream-mode/
+  // extensionPopupGate.ts keeps the popup off screen until it did).
+  const vaultUrl = `chrome-extension://${contractId}/vault.html`;
+  const vaultWindowUrl = `${vaultUrl}?surface=window`;
+  const extWebUrl = `${chain1Url}?surface=extension-window`;
+  const extDriverUrl = `chrome-extension://${contractId}/probe.html`;
+  await ui.evaluate(`window.voksa.stream.update({ enabled: true })`);
+  const extDriverTabId = await ui.evaluate(`window.voksa.tabs.create(${J(extDriverUrl)})`);
+  const extDriver = await connectPageTarget(extDriverUrl, 'extension driver page');
+  await waitFor(
+    'extension driver page has chrome.windows',
+    async () =>
+      extDriver.evaluate(`typeof chrome !== 'undefined' && !!chrome.windows && typeof chrome.windows.create === 'function'`),
+    STEP_TIMEOUT_MS,
+  );
+  /** The library's chrome.* API answers inside the window (its preload ran next to ours). */
+  const assertExtensionApi = async (client, label) => {
+    const api = await client.evaluate(
+      `chrome.tabs.query({}).then((tabs) => ({ id: chrome.runtime.id, tabs: tabs.length }))`,
+    );
+    if (api?.id !== contractId || !(api.tabs >= 1)) {
+      throw new Error(
+        `the extension API is broken inside the ${label} (got ${J(api)}): the page preload must not get in ` +
+          "the way of electron-chrome-extensions' own session preload",
+      );
+    }
+  };
+
+  // (a) chrome.windows.create with an extension page.
+  await extDriver.evaluate(
+    `void chrome.windows.create({ type: 'popup', url: ${J(vaultWindowUrl)}, width: 480, height: 420 }), true`,
+  );
+  const vaultWindow = await connectPageTarget(
+    vaultWindowUrl,
+    'chrome.windows.create popup (extension page)',
+    'createWindow in src/main/extensions/webstore.ts never loaded the page',
+  );
+  await awaitMaskedPopup(vaultWindow, {
+    label: 'chrome.windows.create popup (extension page)',
+    marker: VAULT_MARKER,
+    email: VAULT_EMAIL,
+    hint: 'createWindow (src/main/extensions/webstore.ts) must build its window with popupWebPreferences()',
+  });
+  await assertExtensionApi(vaultWindow, 'chrome.windows.create popup');
+  await vaultWindow.evaluate(`setTimeout(() => window.close(), 0), true`);
+
+  // (b) chrome.windows.create with a web page (an extension's own sign-in
+  //     window): masked, iframe guarded, and no opener (Chrome gives it none).
+  await extDriver.evaluate(
+    `void chrome.windows.create({ type: 'popup', url: ${J(extWebUrl)}, width: 560, height: 440 }), true`,
+  );
+  const extWebWindow = await connectPageTarget(
+    extWebUrl,
+    'chrome.windows.create popup (web page)',
+    'createWindow in src/main/extensions/webstore.ts never loaded the page',
+  );
+  await awaitMaskedPopup(extWebWindow, {
+    label: 'chrome.windows.create popup (web page)',
+    marker: CHAIN1_MARKER,
+    email: CHAIN1_EMAIL,
+    frame: true,
+    openerMarker: null,
+    hint:
+      'createWindow must build its window with popupWebPreferences() and have it adopted (frame guard) ' +
+      'before its first load: TabManager.adoptPopup',
+  });
+  await extWebWindow.evaluate(`setTimeout(() => window.close(), 0), true`);
+
+  // (c) The toolbar action popup, opened through the real UI path (the
+  //     <button is="browser-action"> the chrome UI renders for the fixture).
+  const actionSelector = `button[is="browser-action"][id="${contractId}"]`;
+  await waitFor(
+    'fixture action button in the toolbar',
+    async () => ui.evaluate(`document.querySelector(${J(actionSelector)}) !== null`),
+    STEP_TIMEOUT_MS,
+    'the chrome UI renders no action button for the fixture (ExtensionActions.tsx)',
+  );
+  await ui.evaluate(`document.querySelector(${J(actionSelector)}).click()`);
+  const actionPopup = await connectPageTarget(
+    vaultUrl,
+    'extension action popup',
+    'clicking the action button opened no popup (electron-chrome-extensions browserAction.activate)',
+  );
+  await awaitMaskedPopup(actionPopup, {
+    label: 'extension action popup',
+    marker: VAULT_MARKER,
+    email: VAULT_EMAIL,
+    shown: true,
+    hint:
+      'the action popup has no preload of its own: the session preload (src/preload/extensionPopup.ts) must ' +
+      'run page.js there, and the gate (stream-mode/extensionPopupGate.ts) must show it once proven',
+  });
+  await assertExtensionApi(actionPopup, 'action popup');
+  await actionPopup.evaluate(`setTimeout(() => window.close(), 0), true`);
+  await waitFor(
+    'extension windows closed',
+    async () =>
+      !(await listTargets()).some(
+        (t) => t.type === 'page' && [vaultUrl, vaultWindowUrl, extWebUrl].includes(t.url),
+      ),
+    STEP_TIMEOUT_MS,
+    'an extension window survived window.close()',
+  );
+  await ui.evaluate(`window.voksa.tabs.close(${J(extDriverTabId)})`);
+
+  // (d) An extension page EMBEDDED in a web page (a password manager's inline
+  //     menu). Not a window, but the same kind of document, and the one Electron
+  //     45 changed: a chrome-extension:// SUBframe no longer gets session or
+  //     window preloads, so there the frame guard's fallback masker is what
+  //     covers it, while the parent keeps the iframe hidden until it does.
+  //     Cross-origin, so the frame is read through its own CDP target.
+  const extFrameHostUrl = `${probe.origin}/ext-frame.html?id=${contractId}`;
+  const extFrameUrl = `${vaultUrl}?surface=iframe`;
+  const extFrameTabId = await ui.evaluate(`window.voksa.tabs.create(${J(extFrameHostUrl)})`);
+  const extFrameHost = await connectPageTarget(extFrameHostUrl, 'page embedding an extension frame');
+  const extFrameTarget = await waitFor(
+    'extension iframe CDP target',
+    async () => (await listTargets()).find((t) => t.type === 'iframe' && t.url === extFrameUrl),
+    STEP_TIMEOUT_MS,
+    'the chrome-extension:// iframe never loaded (web_accessible_resources in the fixture manifest?)',
+  );
+  const extFrame = await CdpClient.connect(extFrameTarget.webSocketDebuggerUrl, 'extension iframe');
+  clients.push(extFrame);
+  let extFrameState = null;
+  const extFrameStart = Date.now();
+  for (;;) {
+    if (exited) throw new Error('electron exited while watching the embedded extension frame');
+    if (Date.now() - extFrameStart > GUARD_TIMEOUT_MS) {
+      throw new Error(
+        `the embedded extension frame never settled masked AND visible within ${GUARD_TIMEOUT_MS}ms; last ` +
+          `state: ${J(extFrameState)}. It must be covered (page preload, or the frame guard's fallback masker ` +
+          'where Electron gives a chrome-extension:// subframe no preload) and then revealed by the parent',
+      );
+    }
+    try {
+      const host = await extFrameHost.evaluate(`(() => {
+        const shrouded = Number(getComputedStyle(document.documentElement).opacity) === 0;
+        const f = document.getElementById('f');
+        if (!f) return { visible: false, shrouded, body: '' };
+        const cs = getComputedStyle(f);
+        const r = f.getBoundingClientRect();
+        return {
+          shrouded,
+          visible: !shrouded && cs.visibility === 'visible' && cs.display !== 'none' &&
+            Number(cs.opacity) !== 0 && r.width > 0 && r.height > 0,
+          body: document.body.innerText,
+        };
+      })()`);
+      const frame = await extFrame.evaluate(
+        `({ text: document.body ? document.body.innerText : '', opacity: getComputedStyle(document.documentElement).opacity })`,
+      );
+      extFrameState = { host, frame };
+    } catch {
+      await sleep(100);
+      continue;
+    }
+    const { host, frame } = extFrameState;
+    if (host.visible && Number(frame.opacity) !== 0 && frame.text.includes(VAULT_EMAIL)) {
+      throw new Error(
+        `ZERO-FRAME LEAK (extension frame embedded in a page): visible while showing raw ${VAULT_EMAIL}. ` +
+          `state: ${J(extFrameState)}. See src/main/stream-mode/frameGuard.ts (fallback for preload-less frames)`,
+      );
+    }
+    if (
+      host.visible &&
+      host.body.includes(EXT_FRAME_HOST_MARKER) &&
+      frame.text.includes(VAULT_MARKER) &&
+      !frame.text.includes(VAULT_EMAIL)
+    ) {
+      break;
+    }
+    await sleep(100);
+  }
+  // OBSERVED, not asserted (either is safe): which layer covers that frame on
+  // this Electron. The fallback leaves its one main-world handle behind.
+  const extFrameCover = await extFrame.evaluate(
+    `typeof window[Symbol.for('voksa.fallbackMask')] === 'object' ? 'the frame guard fallback masker' : 'the page preload'`,
+  );
+  console.log(`[smoke] note: embedded extension frame covered by ${extFrameCover}`);
+  await ui.evaluate(`window.voksa.tabs.close(${J(extFrameTabId)})`);
+  await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  pass('EXTENSION WINDOWS UNDER STREAM');
+
+  // --- 29. NO RENDERER EXCEPTIONS -------------------------------------------------
   if (uiExceptions.length > 0) {
     throw new Error(
       `chrome UI threw ${uiExceptions.length} uncaught exception(s) during the run:\n${uiExceptions.join('\n')}`,

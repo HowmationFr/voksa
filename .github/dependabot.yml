@@ -22,6 +22,11 @@ updates:
     open-pull-requests-limit: 10
     ignore:
       - dependency-name: electron-chrome-extensions
+      # Also PATCHED, for security (exact Chrome Web Store origin, extension
+      # ID validation: patches/electron-chrome-web-store+0.13.0.patch) and
+      # pinned exactly. A bump must port the patch by hand; the vitest guard
+      # (webstorePatch.test.ts) fails if the installed files lose the checks.
+      - dependency-name: electron-chrome-web-store
       # MAJORS ARE OURS. A major version is a planned migration (Electron 43,
       # React 19, Tailwind 4...), decided and scheduled by a human, never
       # inbound mail. Security fixes travel as patch/minor and keep flowing;

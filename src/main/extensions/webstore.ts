@@ -60,10 +60,6 @@ import {
  * every window. The library forbids two instances per session, so
  * setupChromeWebStore runs ONCE at boot (index.ts), BEFORE any window is
  * created, so both libraries' session preloads are registered in time.
- *
- * The `electron-chrome-extensions` library is dual-licensed (GPL-3.0 or
- * Patron). We go with `GPL-3.0` here since this project is personal/OSS;
- * switch to 'Patron-License-2020-11-19' if you acquire that license.
  */
 
 type ExtensionsRuntime = {
@@ -218,7 +214,6 @@ export async function setupChromeWebStore(session: Session): Promise<void> {
         console.warn('[extensions] extension popup preload not registered:', err);
       }
       const instance = new Ctor({
-        license: 'GPL-3.0',
         session,
         createTab: async (details: TabCreateDetails) => {
           // chrome.tabs.create: options pages, onboarding tabs, "open in

@@ -4,9 +4,11 @@
 #
 # Two repo-specific guardrails (see CLAUDE.md):
 #   - electron-chrome-extensions is PATCHED via patch-package (synthetic
-#     chrome.storage.onChanged + per-tab browser-action state). Bumping it
-#     without re-validating the patch silently breaks extensions like
-#     Bitwarden, so it is never auto-bumped.
+#     chrome.storage.onChanged, per-tab browser-action state, chrome.* mirrored
+#     onto the native `browser` namespace, localized chrome.i18n, no listener
+#     cap). Bumping it without re-validating the patch silently breaks
+#     extensions like Bitwarden or uBO Lite, so it is never auto-bumped (and
+#     pinned exactly in package.json).
 #   - Electron MAJOR upgrades are a planned migration (new Chromium major:
 #     UA plausibility, extension runtime compat, updater internals), never an
 #     automated PR. Patch/minor updates are exactly the security channel and

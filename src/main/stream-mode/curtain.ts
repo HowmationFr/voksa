@@ -23,6 +23,15 @@ import { IPC } from '../../shared/ipcChannels';
 
 const SAFETY_TIMEOUT_MS = 6000;
 const UI_ACK_TIMEOUT_MS = 600;
+/**
+ * The screenshot is cosmetic and the caller's navigation waits on raise():
+ * past this, the curtain goes up with the solid panel instead. capturePage has
+ * no timeout of its own (Electron hands Chromium a zero timeout, and the copy
+ * request then waits for the tab's NEXT frame, which a view that is not
+ * producing frames may never send): unbounded, it stalled the navigation
+ * itself, with no curtain and no load.
+ */
+const CAPTURE_TIMEOUT_MS = 300;
 
 export type OverlayController = {
   acquire: (key: string) => void;
@@ -91,22 +100,13 @@ export class CurtainController {
   ): Promise<void> {
     const token = this.nextToken++;
 
-    let dataURL: string | null = null;
-    if (kind === 'screenshot' && tabView) {
-      try {
-        const image = await tabView.webContents.capturePage();
-        if (!image.isEmpty()) dataURL = image.toDataURL({ scaleFactor: 1 });
-      } catch {
-        // capturePage can fail mid-navigation; fall back to a solid panel.
-      }
-    }
-
-    // Register the record BEFORE awaiting the UI ack. Previously it was set
-    // only after the ack, which left a window where a concurrent drop() (a
-    // panic double-press, a fast re-navigation) found no record, no-oped, and
-    // the curtain hung until the 6s fail-to-blank. isActive/onReady during the
-    // wait are correct with the record present (the tab IS curtained), and the
-    // caller only issues its load after this resolves, so no ready races in.
+    // Register the record (and its fail-to-blank timer) BEFORE any await: the
+    // screenshot and the UI ack. Previously it was set only after the ack,
+    // which left a window where a concurrent drop() (a panic double-press, a
+    // fast re-navigation) found no record, no-oped, and the curtain hung until
+    // the 6s fail-to-blank. isActive/onReady during the wait are correct with
+    // the record present (the tab IS curtained), and the caller only issues
+    // its load after this resolves, so no ready races in.
     const prev = this.records.get(tabId);
     if (prev) clearTimeout(prev.safetyTimer);
     this.records.set(tabId, {
@@ -114,8 +114,33 @@ export class CurtainController {
       expectedNonce: null,
       safetyTimer: setTimeout(() => this.clear(tabId, token), SAFETY_TIMEOUT_MS),
     });
+
+    const dataURL = kind === 'screenshot' && tabView ? await this.screenshot(tabView) : null;
+    // Dropped (ready, tab closed, stream off) or superseded during the
+    // screenshot: painting it now would put up a stale curtain.
+    if (this.records.get(tabId)?.token !== token) return;
+
     this.overlay.acquire(this.overlayKey(tabId));
     await this.waitForAck(tabId, token, dataURL);
+  }
+
+  /** The tab's current frame as a data URL, or null (solid panel) on failure or timeout. */
+  private async screenshot(tabView: WebContentsView): Promise<string | null> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const image = await Promise.race([
+        tabView.webContents.capturePage(),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), CAPTURE_TIMEOUT_MS);
+        }),
+      ]);
+      return image && !image.isEmpty() ? image.toDataURL({ scaleFactor: 1 }) : null;
+    } catch {
+      // capturePage can fail mid-navigation; fall back to a solid panel.
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** A new document started in this tab: pair the pending curtain to it. */

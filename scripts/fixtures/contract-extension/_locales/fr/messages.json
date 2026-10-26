@@ -1,4 +1,10 @@
 {
   "probeTitle": { "message": "Sonde de contrat" },
-  "probeMessage": { "message": "sonde-francaise" }
+  "probeMessage": { "message": "sonde-francaise" },
+  "probeCase": { "message": "casse-francaise" },
+  "probePlaceholder": {
+    "message": "bonjour $who$ et $1",
+    "placeholders": { "who": { "content": "monde" } }
+  },
+  "probeEscape": { "message": "<b>$1</b> francais" }
 }

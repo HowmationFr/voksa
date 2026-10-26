@@ -1,7 +1,7 @@
 {
   "name": "voksa",
   "productName": "Voksa",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "Voksa",
   "author": "Voksa",
   "license": "GPL-3.0-only",
@@ -9,7 +9,7 @@
   "private": true,
   "main": "dist-electron/main/index.js",
   "scripts": {
-    "postinstall": "patch-package --error-on-fail --error-on-warn && electron-rebuild -f -w better-sqlite3",
+    "postinstall": "patch-package --error-on-fail --error-on-warn",
     "dev": "node scripts/dev.mjs",
     "build": "npm run build:ui && npm run build:main",
     "build:ui": "vite build",
@@ -26,8 +26,8 @@
     "package:linux": "npm run build && electron-builder --linux"
   },
   "dependencies": {
-    "better-sqlite3": "^12.11.1",
-    "electron-chrome-extensions": "^4.9.0",
+    "better-sqlite3": "^13.0.3",
+    "electron-chrome-extensions": "4.10.0",
     "electron-chrome-web-store": "0.13.0",
     "electron-updater": "^6.8.11"
   },
@@ -43,7 +43,7 @@
     "@typescript-eslint/parser": "^8.72.0",
     "@vitejs/plugin-react": "^5.2.0",
     "autoprefixer": "^10.6.1",
-    "electron": "^44.9.3",
+    "electron": "^45.0.0",
     "electron-builder": "^26.18.0",
     "esbuild": "^0.28.2",
     "eslint": "^9.39.5",

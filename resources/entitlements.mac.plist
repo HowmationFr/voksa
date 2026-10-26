@@ -3,8 +3,10 @@
 <!--
   Hardened-runtime entitlements for the signed/notarized macOS build.
   - allow-jit + allow-unsigned-executable-memory: required by V8/Chromium.
-  - disable-library-validation: required to load our compiled native module
-    (better-sqlite3) inside the hardened runtime.
+  - disable-library-validation: kept from when better-sqlite3 was compiled on
+    the build machine. Its prebuilt N-API addon is now re-signed with our
+    Team ID at packaging, which library validation accepts: a candidate for
+    removal once a signed, notarized build is tested without it.
   - audio-input + camera: getUserMedia (browser feature); the matching
     NSMicrophoneUsageDescription / NSCameraUsageDescription strings are
     declared in electron-builder.yml (extendInfo).

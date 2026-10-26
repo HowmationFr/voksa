@@ -24,10 +24,13 @@ export type PickerSource = {
  * about to be armed. Withhold those unconditionally: the picker shows a
  * neutral tile for Voksa surfaces, the real (masked) content only appears once
  * the capture actually starts. Non-Voksa windows (a game, a Zoom window) keep
- * their thumbnail: nothing of ours is in them.
+ * their thumbnail: nothing of ours is in them, UNLESS Stream Mode is on. The
+ * picker is itself on screen, hence on the stream, and any foreground page can
+ * raise it (legacy getUserMedia needs no click): then every tile is neutral,
+ * or a page could paint the user's other windows onto the live stream.
  */
-export function thumbnailIsSafe(containsVoksa: boolean): boolean {
-  return !containsVoksa;
+export function thumbnailIsSafe(containsVoksa: boolean, streaming: boolean): boolean {
+  return !containsVoksa && !streaming;
 }
 
 /**
@@ -52,4 +55,58 @@ export function windowHandleFromSourceId(id: string): string | null {
   // appears and normalize to a decimal string for comparison.
   const n = raw.startsWith('0x') ? Number.parseInt(raw, 16) : Number.parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? String(n) : null;
+}
+
+/**
+ * A user pick bound to ONE requesting webContents. Since Electron 45 every
+ * screen-capture request reaches setPermissionRequestHandler first, as
+ * 'display-capture': the permission-time gate issues the ticket, and the
+ * display-media handler (getDisplayMedia only) consumes it and delivers
+ * exactly this source.
+ */
+export type CaptureTicket = {
+  requesterId: number;
+  /**
+   * The request's securityOrigin, raw. The permission details and the
+   * display-media request carry the same string (MediaStreamRequest's origin,
+   * 'file:///' included), so equality needs no URL parsing.
+   */
+  securityOrigin: string;
+  sourceId: string;
+  name: string;
+  consumed: boolean;
+};
+
+/**
+ * Whether a display-media request from `requesterId` / `securityOrigin` may
+ * take this ticket: same webContents, same origin, not taken yet. An empty
+ * origin never matches (fail closed).
+ */
+export function ticketMatches(
+  ticket: CaptureTicket | undefined,
+  requesterId: number | null,
+  securityOrigin: string | null | undefined,
+): ticket is CaptureTicket {
+  if (!ticket || ticket.consumed || requesterId === null) return false;
+  if (ticket.requesterId !== requesterId) return false;
+  return !!securityOrigin && securityOrigin === ticket.securityOrigin;
+}
+
+/**
+ * Grant a gated display-capture permission and report which Chromium path
+ * took it. For getDisplayMedia, Electron 45 runs the display-media handler
+ * SYNCHRONOUSLY inside the permission callback (OnPermissionResponse ->
+ * MediaAccessAllowed -> ChooseDisplayMediaDevice -> JS handler; observed on
+ * Windows, asserted cross-platform by the smoke). The legacy
+ * getUserMedia({chromeMediaSource}) path never calls it: HandleUserMediaRequest
+ * builds the device straight from the page's own source id, the whole desktop
+ * when it names none. So "the handler did not run during grant(true)" means
+ * the page is now capturing a source IT chose, not the user's pick.
+ */
+export function grantAndClassify(
+  grant: (allowed: boolean) => void,
+  displayHandlerRan: () => boolean,
+): 'display-media' | 'legacy-getusermedia' {
+  grant(true);
+  return displayHandlerRan() ? 'display-media' : 'legacy-getusermedia';
 }

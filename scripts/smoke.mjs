@@ -67,11 +67,14 @@
 //  22. PANIC: voksa.stream.panic() (the same action the global hotkey fires)
 //      curtains the window, arms Stream Mode, and reports active; the second
 //      call restores the curtain but leaves the stream armed on purpose.
-//  23. CAPTURE HANDSHAKE: driving the controller (getDisplayMedia does not
-//      route to setDisplayMediaRequestHandler under CDP, so a debug seam
-//      enters the SAME path) raises OUR picker, picking a Voksa source arms
-//      Stream Mode before the source is delivered, and the delivered id is the
-//      one picked.
+//  23. CAPTURE HANDSHAKE: driving the chrome-UI picker path (debug seam)
+//      raises OUR picker, picking a Voksa source arms Stream Mode before the
+//      source is delivered, and the delivered id is the one picked.
+//      23b-23d, CAPTURE GATE through the REAL Chromium entry points (Electron
+//      45 reports every screen capture as 'display-capture'): getDisplayMedia
+//      shows OUR picker, naming the site, and receives the pick from inside
+//      the gated grant; legacy getUserMedia({chromeMediaSource}) is never
+//      handed a stream; a background tab never gets a picker.
 //  24. GO-LIVE PREFLIGHT: a tab whose title carries an email is flagged (with
 //      a MASKED preview), a clean profile flags nothing (anti-vacuity), and
 //      the flag names a real tab id.
@@ -165,6 +168,11 @@ const AUTH_PASS = 'smokepass';
 const AUTH_OK_MARKER = 'AUTH-GRANTED-PAGE';
 const AUTH_DENIED_MARKER = 'AUTH-DENIED-BODY';
 const TLS_OK_MARKER = 'TLS-PAGE-LOADED';
+
+// Exact capture-gate outcome lines printed by src/main/stream-mode/captureHandshake.ts.
+const CAPTURE_GDM_DELIVERED = '[capture] getDisplayMedia received the picked source';
+const CAPTURE_LEGACY_BLOCKED = '[capture] legacy getUserMedia screen capture blocked: renderer killed';
+const CAPTURE_REFUSED_BACKGROUND = '[capture] screen capture refused: requester not in the foreground';
 
 // Exact ready lines printed by src/main/extensions/webstore.ts.
 const EXT_RUNTIME_READY = '[extensions] Chrome extension runtime ready.';
@@ -305,7 +313,7 @@ async function waitFor(what, fn, timeoutMs = BOOT_TIMEOUT_MS, hint = '') {
 
 // ---------------------------------------------------------------------------
 // Minimal CDP client over WebSocket. Prefers the global WebSocket (Node 22+),
-// falls back to the `ws` devDependency on Node 20 CI runners.
+// falls back to the `ws` devDependency where WebSocket is not global.
 // ---------------------------------------------------------------------------
 
 function openNativeSocket(url) {
@@ -404,7 +412,12 @@ class CdpClient {
 
   static async connect(wsUrl, label) {
     const client = new CdpClient(await openSocket(wsUrl), label);
-    await client.send('Runtime.enable');
+    try {
+      await client.send('Runtime.enable');
+    } catch (err) {
+      client.close(); // callers may retry: never leave a half-open socket behind
+      throw err;
+    }
     return client;
   }
 
@@ -507,6 +520,8 @@ function startProbeServer() {
       <p>${CLEAN_FRAME_MARKER}</p>
       <p>frame contact: ${CLEAN_FRAME_EMAIL}</p>
     </body></html>`,
+    // Scenario 23b-d: a plain page that asks to capture the screen.
+    '/capture.html': `<!doctype html><html><head><meta charset="utf-8"><title>capture</title></head><body><p>capture probe</p></body></html>`,
     // Scenario 24: a page whose TITLE carries an email, for the preflight scan.
     '/leaky-title.html': `<!doctype html><html><head><meta charset="utf-8">
       <title>Inbox ${FRAME_EMAIL}</title></head><body><p>leaky title page</p></body></html>`,
@@ -962,17 +977,61 @@ const POPUP_STATE_EXPR = `(() => {
   };
 })()`;
 
-/** Connect to a page target (tab or popup window) by exact URL. */
+/**
+ * A CDP client on the page target (tab or popup window) listed under an exact
+ * URL, that follows that target. A popup is listed under its final URL BEFORE
+ * its document commits, and a connection made in that window can see its
+ * socket close or its target swapped (lived: scenario 27 failed once on Windows
+ * CI with "CDP socket closed (popup level 2)", thrown by the Runtime.enable of
+ * the connection itself). Same discipline as scenario 13: a failed call
+ * re-resolves the target by URL and reconnects when the socket closed or the id
+ * changed, then rethrows. Callers keep their own deadline and their verdicts.
+ */
+class PageClient {
+  constructor(url, label) {
+    this.url = url;
+    this.label = label;
+    this.client = null;
+    this.targetId = null;
+  }
+
+  /** (Re)connect to the target listed under `url`; false while none is. */
+  async attach() {
+    const target = (await listTargets()).find((t) => t.type === 'page' && t.url === this.url);
+    if (!target) return false;
+    if (this.client && !this.client.closed && target.id === this.targetId) return true;
+    const client = await CdpClient.connect(target.webSocketDebuggerUrl, this.label);
+    clients.push(client);
+    this.client?.close();
+    this.client = client;
+    this.targetId = target.id;
+    return true;
+  }
+
+  async evaluate(expression, opts) {
+    try {
+      return await this.client.evaluate(expression, opts);
+    } catch (err) {
+      let followed = '';
+      try {
+        if (!(await this.attach())) followed = `; no page target listed under ${this.url}`;
+      } catch (reconnectErr) {
+        followed = `; reconnect failed: ${reconnectErr.message}`;
+      }
+      throw new Error(`${err.message}${followed}`);
+    }
+  }
+}
+
+/**
+ * Connect to a page target (tab or popup window) by exact URL. A connection
+ * that fails (socket closed under Runtime.enable) is retried like a target not
+ * listed yet, and the last CDP error ends up in the timeout message.
+ */
 async function connectPageTarget(url, label, hint) {
-  const target = await waitFor(
-    `${label} CDP target`,
-    async () => (await listTargets()).find((t) => t.type === 'page' && t.url === url),
-    STEP_TIMEOUT_MS,
-    hint,
-  );
-  const client = await CdpClient.connect(target.webSocketDebuggerUrl, label);
-  clients.push(client);
-  return client;
+  const page = new PageClient(url, label);
+  await waitFor(`${label} CDP target`, () => page.attach(), STEP_TIMEOUT_MS, hint);
+  return page;
 }
 
 /**
@@ -985,15 +1044,19 @@ async function connectPageTarget(url, label, hint) {
  * window really is on screen (document.visibilityState), so a gate that kept
  * it hidden forever cannot pass.
  */
-async function awaitMaskedPopup(client, opts) {
+async function awaitMaskedPopup(page, opts) {
   let st = null;
+  let lastSampleError = null;
   const start = Date.now();
   while (Date.now() - start < GUARD_TIMEOUT_MS) {
     if (exited) throw new Error(`electron exited while watching ${opts.label}`);
     try {
-      st = await client.evaluate(POPUP_STATE_EXPR);
-    } catch {
-      // renderer busy / navigating: retry
+      st = await page.evaluate(POPUP_STATE_EXPR);
+    } catch (err) {
+      // Renderer busy / navigating, or socket closed / target swapped (the
+      // PageClient already followed it): not a verdict, sample again. A popup
+      // that never comes back still fails below, on the deadline.
+      lastSampleError = err.message;
       await sleep(100);
       continue;
     }
@@ -1035,7 +1098,8 @@ async function awaitMaskedPopup(client, opts) {
   throw new Error(
     `${opts.label} never settled masked${opts.frame ? ', iframe guarded' : ''}` +
       `${opts.openerMarker ? ', opener reachable' : ''}${opts.shown ? ', on screen' : ''} ` +
-      `within ${GUARD_TIMEOUT_MS}ms; last state: ${JSON.stringify(st)}. ${opts.hint}`,
+      `within ${GUARD_TIMEOUT_MS}ms; last state: ${JSON.stringify(st)}` +
+      `${lastSampleError ? `; last sampling error: ${lastSampleError}` : ''}. ${opts.hint}`,
   );
 }
 
@@ -2170,13 +2234,10 @@ async function main() {
   pass('PANIC');
 
   // --- 23. CAPTURE HANDSHAKE ------------------------------------------------------
-  // getDisplayMedia does not route to setDisplayMediaRequestHandler under CDP
-  // in this Electron build, so the real Chromium entry edge cannot be driven
-  // here (verified: the handler is never invoked). The debug seam
-  // (voksa.capture.simulate) enters the SAME controller path from a known
-  // requester, so everything the feature owns IS exercised: source
-  // enumeration, our picker, arming Stream Mode before delivery, and returning
-  // the picked id. Only the trivial Chromium->handler glue is out of reach.
+  // The debug seam (voksa.capture.simulate) drives the chrome-UI picker path
+  // of the controller from a known requester: source enumeration, our picker,
+  // arming Stream Mode before delivery, and returning the picked id. The web
+  // path (permission-time gate) is driven for real by 23b-23d below.
   await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
   const simPromise = ui.evaluate(`window.voksa.capture.simulate()`);
 
@@ -2221,6 +2282,203 @@ async function main() {
     await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
     pass('CAPTURE HANDSHAKE');
   }
+
+  // --- 23b-23d. CAPTURE GATE, REAL CHROMIUM EDGE ----------------------------------
+  // Electron 45 reports getDisplayMedia AND legacy getUserMedia({chromeMediaSource})
+  // to the permission handler as 'display-capture', and on the legacy path that
+  // grant IS the capture (no picker, a page-chosen source, the whole desktop
+  // when none is named). So OUR picker runs at permission time, and the gate
+  // tells the two paths apart only because the display-media handler runs
+  // synchronously inside the grant: that ordering is the premise of the fix,
+  // proven here through the real entry points, on every OS. Main logs each
+  // gate outcome and those lines are the proof: a page-side error alone cannot
+  // tell "our handler refused" from "the OS capturer failed to start" (headless
+  // CI).
+  const captureUrl = (n) => `${probe.origin}/capture.html?n=${n}`;
+  const openCaptureTab = async (n) => {
+    const id = await ui.evaluate(`window.voksa.tabs.create(${J(captureUrl(n))})`);
+    const target = await waitFor(
+      `capture probe (${n}) CDP target`,
+      async () => (await listTargets()).find((t) => t.type === 'page' && t.url === captureUrl(n)),
+      STEP_TIMEOUT_MS,
+    );
+    const capPage = await CdpClient.connect(target.webSocketDebuggerUrl, `capture probe (${n})`);
+    clients.push(capPage);
+    await waitFor(
+      `capture probe (${n}) loaded`,
+      async () => (await capPage.evaluate(`document.readyState`)) === 'complete',
+      STEP_TIMEOUT_MS,
+    );
+    return { id, capPage };
+  };
+  const pickerOpen = () => ui.evaluate(`document.querySelector('[data-voksa-capture-picker]') !== null`);
+  const pickerCount = () =>
+    ui.evaluate(
+      `Number(document.querySelector('[data-voksa-capture-picker]').getAttribute('data-voksa-capture-picker'))`,
+    );
+  const pickFirstSource = async () => {
+    await ui.evaluate(`document.querySelector('[data-voksa-capture-source]').click()`);
+    await ui.evaluate(`document.querySelector('[data-voksa-capture-confirm]').click()`);
+  };
+  const cancelPicker = () =>
+    ui.evaluate(`(() => {
+      const picker = document.querySelector('[data-voksa-capture-picker]');
+      for (const b of picker ? picker.querySelectorAll('button') : []) {
+        if (/Annuler|Cancel/.test(b.textContent || '')) { b.click(); return true; }
+      }
+      return false;
+    })()`);
+  const CAPTURE_PROBE = (call) => `${call}.then(
+    (s) => { const n = s.getVideoTracks().length; s.getTracks().forEach((t) => t.stop()); return { ok: true, tracks: n }; },
+    (e) => ({ ok: false, name: e.name, message: e.message }))`;
+  const GET_DISPLAY_MEDIA = CAPTURE_PROBE(`navigator.mediaDevices.getDisplayMedia({ video: true })`);
+  const LEGACY_DESKTOP_GUM = CAPTURE_PROBE(
+    `navigator.mediaDevices.getUserMedia({ video: { mandatory: { chromeMediaSource: 'desktop' } } })`,
+  );
+
+  // 23b. getDisplayMedia: OUR picker (naming the site) is the only dialog,
+  // and the display-media handler runs inside the gated grant.
+  await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  {
+    const mark = output.length;
+    const { id, capPage } = await openCaptureTab('gdm');
+    const gdm = capPage.evaluate(GET_DISPLAY_MEDIA, { userGesture: true });
+    await waitFor(
+      'getDisplayMedia raised the Voksa picker',
+      pickerOpen,
+      STEP_TIMEOUT_MS,
+      'the permission-time gate did not show OUR picker (permissions.ts display-capture -> captureHandshake.gatePermission)',
+    );
+    const host = new URL(probe.origin).host;
+    const pickerText = await ui.evaluate(`document.querySelector('[data-voksa-capture-picker]').textContent`);
+    if (!pickerText.includes(host)) {
+      throw new Error(`the capture picker (the consent) does not name the requesting site ${host}`);
+    }
+    if ((await pickerCount()) < 1) {
+      console.log('[smoke] note: 0 screen-share sources enumerated; CAPTURE GATE delivery skipped');
+      await cancelPicker();
+      const r = await gdm;
+      if (r?.ok || r?.name !== 'NotAllowedError') {
+        throw new Error(`cancelling the gate picker must deny getDisplayMedia (got ${JSON.stringify(r)})`);
+      }
+    } else {
+      const pickedVoksa = await ui.evaluate(
+        `document.querySelector('[data-voksa-capture-source]').getAttribute('data-voksa-capture-contains-voksa') === 'true'`,
+      );
+      await pickFirstSource();
+      await waitFor(
+        'getDisplayMedia received the picked source',
+        async () => output.slice(mark).includes(CAPTURE_GDM_DELIVERED),
+        STREAM_TIMEOUT_MS + STEP_TIMEOUT_MS,
+        `main never logged "${CAPTURE_GDM_DELIVERED}": the display-media handler did not run inside the gated grant, or refused its ticket`,
+      );
+      if (output.slice(mark).includes(CAPTURE_LEGACY_BLOCKED)) {
+        throw new Error('getDisplayMedia was classified as the legacy getUserMedia path (its tab was killed)');
+      }
+      // The guarantee on the real path: a Voksa surface is armed BEFORE the
+      // grant, so Stream Mode is on by the time the source was delivered.
+      if (pickedVoksa && !(await ui.evaluate(`window.voksa.stream.get()`))?.enabled) {
+        throw new Error('a Voksa surface was delivered to getDisplayMedia without arming Stream Mode first');
+      }
+      // A track, or the OS capturer failing to start on a headless runner;
+      // never a permission denial after the user picked.
+      const r = await gdm;
+      if (!r?.ok && r?.name === 'NotAllowedError') {
+        throw new Error(`getDisplayMedia was denied after the pick: ${JSON.stringify(r)}`);
+      }
+    }
+    // Stream Mode ON: the picker is on the stream itself, so it must show no
+    // thumbnail at all (any foreground page can raise it).
+    await ui.evaluate(`window.voksa.stream.update({ enabled: true })`);
+    const live = capPage.evaluate(GET_DISPLAY_MEDIA, { userGesture: true });
+    await waitFor('getDisplayMedia raised the picker under Stream Mode', pickerOpen, STEP_TIMEOUT_MS);
+    const thumbs = await ui.evaluate(`document.querySelectorAll('[data-voksa-capture-picker] img').length`);
+    await cancelPicker();
+    await live;
+    if (thumbs > 0) {
+      throw new Error(`the capture picker painted ${thumbs} thumbnail(s) while Stream Mode was on`);
+    }
+    capPage.close();
+    await ui.evaluate(`window.voksa.tabs.close(${J(id)})`);
+    await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  }
+  pass('CAPTURE GATE: getDisplayMedia');
+
+  // 23c. Legacy getUserMedia({chromeMediaSource: 'desktop'}), no source id:
+  // on a bare Electron 45 this silently captures the whole desktop. The gate
+  // cannot tell it from getDisplayMedia, so the picker shows; after the pick
+  // the page must never be handed a stream (its renderer is killed) and
+  // Stream Mode is armed.
+  {
+    const mark = output.length;
+    const { id, capPage } = await openCaptureTab('legacy');
+    let settled = false;
+    const legacy = capPage.evaluate(LEGACY_DESKTOP_GUM).then(
+      (r) => {
+        settled = true;
+        return r;
+      },
+      (err) => {
+        settled = true;
+        return { died: String(err) };
+      },
+    );
+    await waitFor(
+      'legacy getUserMedia raised the Voksa picker (no silent grant)',
+      async () => settled || (await pickerOpen()),
+      STEP_TIMEOUT_MS,
+    );
+    if (!(await pickerOpen())) {
+      throw new Error(`legacy getUserMedia settled without the gate picker: ${JSON.stringify(await legacy)}`);
+    }
+    if ((await pickerCount()) < 1) {
+      console.log('[smoke] note: 0 screen-share sources enumerated; legacy-capture kill skipped');
+      await cancelPicker();
+      const r = await legacy;
+      if (r?.ok || r?.name !== 'NotAllowedError') {
+        throw new Error(`cancelling the gate picker must deny legacy getUserMedia (got ${JSON.stringify(r)})`);
+      }
+    } else {
+      await pickFirstSource();
+      await waitFor(
+        'legacy screen capture blocked',
+        async () => output.slice(mark).includes(CAPTURE_LEGACY_BLOCKED),
+        STREAM_TIMEOUT_MS + STEP_TIMEOUT_MS,
+        `main never logged "${CAPTURE_LEGACY_BLOCKED}" (captureHandshake.blockLegacyCapture)`,
+      );
+      const r = await Promise.race([legacy, sleep(STEP_TIMEOUT_MS).then(() => ({ pending: true }))]);
+      if (r?.ok) {
+        throw new Error(`legacy getUserMedia handed the page a screen track: ${JSON.stringify(r)}`);
+      }
+      if (!(await ui.evaluate(`window.voksa.stream.get()`))?.enabled) {
+        throw new Error('blocking a legacy capture did not arm Stream Mode');
+      }
+    }
+    capPage.close();
+    await ui.evaluate(`window.voksa.tabs.close(${J(id)})`);
+    await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  }
+  pass('CAPTURE GATE: legacy getUserMedia blocked');
+
+  // 23d. A background tab never gets a picker (legacy getUserMedia needs no
+  // user activation, so any tab could otherwise pop a consent dialog at will).
+  {
+    const mark = output.length;
+    const { id, capPage } = await openCaptureTab('background');
+    const fgId = await ui.evaluate(`window.voksa.tabs.create(${J(page2Url)})`);
+    const r = await capPage.evaluate(LEGACY_DESKTOP_GUM);
+    if (r?.ok || r?.name !== 'NotAllowedError') {
+      throw new Error(`a background tab got past the capture gate: ${JSON.stringify(r)}`);
+    }
+    if (await pickerOpen()) throw new Error('a background tab raised the capture picker');
+    if (!output.slice(mark).includes(CAPTURE_REFUSED_BACKGROUND)) {
+      throw new Error(`main never logged "${CAPTURE_REFUSED_BACKGROUND}" for the background tab`);
+    }
+    capPage.close();
+    await ui.evaluate(`window.voksa.tabs.close(${J(id)})`);
+    await ui.evaluate(`window.voksa.tabs.close(${J(fgId)})`);
+  }
+  pass('CAPTURE GATE: background tab refused');
 
   // --- 24. GO-LIVE PREFLIGHT ------------------------------------------------------
   // Baseline: the current tabs are clean (newtab/etc.), so preflight flags
@@ -2604,16 +2862,41 @@ async function main() {
   //    A stable 'english-probe' means getMessage is stuck on the default
   //    locale again (localized getMessage in the patch, or the Chromium lang
   //    switch in index.ts).
-  await waitFor(
+  const localized = await waitFor(
     'extension i18n resolves the profile language in both realms',
     async () => {
       const r = await contractPage.evaluate(`window.report()`).catch(() => null);
-      return r && r.page.i18nMessage === 'sonde-francaise' && r.sw.i18nMessage === 'sonde-francaise';
+      return r && r.page.i18nMessage === 'sonde-francaise' && r.sw.i18nMessage === 'sonde-francaise'
+        ? r
+        : null;
     },
     STEP_TIMEOUT_MS,
     'getMessage kept answering the default locale: localized getMessage (patch) or the Chromium ' +
       'lang switch (index.ts) broke',
   );
+  //    Chromium's message_bundle semantics: names are case-insensitive, and so
+  //    are $placeholder$ names (lowercase in the fixture, like Chrome's docs).
+  if (localized.page.i18nCase !== 'casse-francaise') {
+    throw new Error(
+      `getMessage('PROBECASE') gave ${J(localized.page.i18nCase)}: message names must be case-insensitive (patch, localized getMessage)`,
+    );
+  }
+  if (localized.page.i18nPlaceholder !== 'bonjour monde et x') {
+    throw new Error(
+      `getMessage('probePlaceholder', ['x']) gave ${J(localized.page.i18nPlaceholder)}: $who$ / $1 substitution broke (patch, localized getMessage)`,
+    );
+  }
+  if (localized.page.i18nEscaped !== '&lt;b><i>&lt;/b> francais') {
+    throw new Error(
+      `getMessage('probeEscape', ['<i>'], {escapeLt: true}) gave ${J(localized.page.i18nEscaped)}: escapeLt dropped (patch, localized getMessage)`,
+    );
+  }
+  // 6. Event objects: removeListener / hasListener work (patched ExtensionEvent).
+  if (localized.page.events?.had !== true || localized.page.events?.after !== false) {
+    throw new Error(
+      `storage.onChanged has/removeListener misbehave: ${J(localized.page.events)} (patch, ExtensionEvent listener set)`,
+    );
+  }
   const contractTabs = await ui.evaluate(`window.voksa.tabs.list()`);
   const contractTab = (contractTabs ?? []).find((t) => (t.url ?? '').includes(contractId));
   if (contractTab) await ui.evaluate(`window.voksa.tabs.close(${J(contractTab.id)})`);
@@ -2689,9 +2972,16 @@ async function main() {
     hint: popupHint,
   });
   // The chain is whole end to end: from the grandchild, opener.opener is the TAB
-  // (OAuth flows post their result up exactly this way).
-  const chainRoot = await chain2.evaluate(
-    `(() => { try { return window.opener.opener.document.body.innerText; } catch (e) { return 'ERR:' + e.message; } })()`,
+  // (OAuth flows post their result up exactly this way). Only CDP errors are
+  // retried: whatever value comes back is the verdict, checked below.
+  const { value: chainRoot } = await waitFor(
+    'window.opener.opener from the grandchild popup',
+    async () => ({
+      value: await chain2.evaluate(
+        `(() => { try { return window.opener.opener.document.body.innerText; } catch (e) { return 'ERR:' + e.message; } })()`,
+      ),
+    }),
+    STEP_TIMEOUT_MS,
   );
   if (typeof chainRoot !== 'string' || !chainRoot.includes(CHAIN_OPENER_MARKER)) {
     throw new Error(
@@ -2845,6 +3135,19 @@ async function main() {
       'before its first load: TabManager.adoptPopup',
   });
   await extWebWindow.evaluate(`setTimeout(() => window.close(), 0), true`);
+  // Both windows must be GONE before (c): an action popup closes as soon as it
+  // loses focus to another Voksa window (electron-chrome-extensions
+  // PopupView.maybeClose, Chrome's behaviour too), and on macOS a window
+  // closing hands the focus back asynchronously, so a close still in flight
+  // can take it from the popup that just opened.
+  await waitFor(
+    'chrome.windows.create popups closed',
+    async () =>
+      !(await listTargets()).some((t) => t.type === 'page' && [vaultWindowUrl, extWebUrl].includes(t.url)),
+    STEP_TIMEOUT_MS,
+    'a chrome.windows.create popup survived window.close()',
+  );
+  await sleep(300); // let the OS settle the focus the closed windows released
 
   // (c) The toolbar action popup, opened through the real UI path (the
   //     <button is="browser-action"> the chrome UI renders for the fixture).

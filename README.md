@@ -205,7 +205,7 @@ Voksa is built to be the one you keep.</i>
 
 - The only servers Voksa talks to on its own are your search engine's suggestion endpoint as you type, and GitHub Releases to check for updates.
 - **Site permissions are yours**: every camera, microphone or location request prompts, decisions are remembered per site and editable from the address bar.
-- Built on free software, and it says so: `voksa://credits` lists all 75 open source projects shipped inside a Voksa build, with their licenses.
+- Built on free software, and it says so: `voksa://credits` lists all 40 open source projects shipped inside a Voksa build, with their licenses.
 
  
 ## 📥 Install

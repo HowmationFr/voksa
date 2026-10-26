@@ -31,142 +31,162 @@ function on<T>(channel: IpcChannel, handler: (payload: T) => void): Unsubscribe 
   return () => ipcRenderer.removeListener(channel, listener);
 }
 
+/**
+ * ipcRenderer.invoke that always fails as a rejected promise. Since Electron 45
+ * the sandboxed ipcRenderer is native and throws SYNCHRONOUSLY when an argument
+ * cannot be serialized or the context is already released (it used to be an
+ * async function, so those became rejections). Every bridge method returns a
+ * promise; callers' .catch() must keep seeing every failure.
+ */
+function invoke(channel: IpcChannel, ...args: unknown[]): ReturnType<typeof ipcRenderer.invoke> {
+  try {
+    return ipcRenderer.invoke(channel, ...args);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+}
+
 export function buildVoksaApi() {
   return {
     tabs: {
-      create: (url?: string): Promise<string> => ipcRenderer.invoke(IPC.TAB_CREATE, url),
-      close: (id: string) => ipcRenderer.invoke(IPC.TAB_CLOSE, id),
-      activate: (id: string) => ipcRenderer.invoke(IPC.TAB_ACTIVATE, id),
-      reorder: (ids: string[]) => ipcRenderer.invoke(IPC.TAB_REORDER, ids),
+      create: (url?: string): Promise<string> => invoke(IPC.TAB_CREATE, url),
+      close: (id: string) => invoke(IPC.TAB_CLOSE, id),
+      activate: (id: string) => invoke(IPC.TAB_ACTIVATE, id),
+      reorder: (ids: string[]) => invoke(IPC.TAB_REORDER, ids),
       /** `engine`: tab-to-search override. `url` is then a QUERY for that engine, and MAIN builds the search URL (the renderer never does). */
       navigate: (id: string, url: string, engine?: string) =>
-        ipcRenderer.invoke(IPC.TAB_NAVIGATE, id, url, engine),
-      back: (id: string) => ipcRenderer.invoke(IPC.TAB_BACK, id),
-      forward: (id: string) => ipcRenderer.invoke(IPC.TAB_FORWARD, id),
-      reload: (id: string) => ipcRenderer.invoke(IPC.TAB_RELOAD, id),
+        invoke(IPC.TAB_NAVIGATE, id, url, engine),
+      back: (id: string) => invoke(IPC.TAB_BACK, id),
+      forward: (id: string) => invoke(IPC.TAB_FORWARD, id),
+      reload: (id: string) => invoke(IPC.TAB_RELOAD, id),
       /**
        * TLS interstitial "continue anyway": trust the exact certificate the
        * user saw, for this app run only, then retry. Resolves false when no
        * exception was pending (nothing happens).
        */
-      tlsProceed: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC.TAB_TLS_PROCEED, id),
-      stop: (id: string) => ipcRenderer.invoke(IPC.TAB_STOP, id),
-      list: (): Promise<TabState[]> => ipcRenderer.invoke(IPC.TAB_LIST),
-      reopenClosed: () => ipcRenderer.invoke(IPC.TAB_REOPEN_CLOSED),
-      mute: (id: string, muted?: boolean) => ipcRenderer.invoke(IPC.TAB_MUTE, id, muted),
+      tlsProceed: (id: string): Promise<boolean> => invoke(IPC.TAB_TLS_PROCEED, id),
+      stop: (id: string) => invoke(IPC.TAB_STOP, id),
+      list: (): Promise<TabState[]> => invoke(IPC.TAB_LIST),
+      reopenClosed: () => invoke(IPC.TAB_REOPEN_CLOSED),
+      mute: (id: string, muted?: boolean) => invoke(IPC.TAB_MUTE, id, muted),
       /** Pin/unpin: the tab is re-homed at the pinned-cluster boundary by main. */
       setPinned: (id: string, pinned: boolean) =>
-        ipcRenderer.invoke(IPC.TAB_SET_PINNED, id, pinned),
+        invoke(IPC.TAB_SET_PINNED, id, pinned),
       /** DMCA Audio Guard chip: this tab may play on stream, for its lifetime. */
-      allowStreamAudio: (id: string) => ipcRenderer.invoke(IPC.TAB_ALLOW_STREAM_AUDIO, id),
+      allowStreamAudio: (id: string) => invoke(IPC.TAB_ALLOW_STREAM_AUDIO, id),
       /**
        * DMCA stage 2: route this tab's audio to the output device with the
        * given LABEL (null = back to the system default). Labels, not ids:
        * deviceIds are origin-hashed (shared/audioRouting.ts).
        */
       setAudioRoute: (id: string, label: string | null) =>
-        ipcRenderer.invoke(IPC.AUDIO_ROUTE_SET, id, label),
-      duplicate: (id: string) => ipcRenderer.invoke(IPC.TAB_DUPLICATE, id),
+        invoke(IPC.AUDIO_ROUTE_SET, id, label),
+      duplicate: (id: string) => invoke(IPC.TAB_DUPLICATE, id),
       /** Free this tab's renderer. Returns false when the tab is protected. */
-      discard: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC.TAB_DISCARD, id),
-      closeOthers: (id: string) => ipcRenderer.invoke(IPC.TAB_CLOSE_OTHERS, id),
-      closeRight: (id: string) => ipcRenderer.invoke(IPC.TAB_CLOSE_RIGHT, id),
+      discard: (id: string): Promise<boolean> => invoke(IPC.TAB_DISCARD, id),
+      closeOthers: (id: string) => invoke(IPC.TAB_CLOSE_OTHERS, id),
+      closeRight: (id: string) => invoke(IPC.TAB_CLOSE_RIGHT, id),
       setChromeBounds: (bounds: ChromeBounds) =>
-        ipcRenderer.invoke(IPC.TAB_SET_CHROME_BOUNDS, bounds),
-      setOverlayMode: (open: boolean) => ipcRenderer.invoke(IPC.CHROME_SET_OVERLAY, open),
+        invoke(IPC.TAB_SET_CHROME_BOUNDS, bounds),
+      setOverlayMode: (open: boolean) => invoke(IPC.CHROME_SET_OVERLAY, open),
       onUpdate: (handler: (tabs: TabState[]) => void): Unsubscribe =>
         on<TabState[]>(IPC.TAB_UPDATED, handler),
     },
     find: {
       start: (id: string, text: string, forward: boolean, matchCase: boolean) =>
-        ipcRenderer.invoke(IPC.FIND_START, id, text, forward, matchCase),
-      stop: (id: string) => ipcRenderer.invoke(IPC.FIND_STOP, id),
+        invoke(IPC.FIND_START, id, text, forward, matchCase),
+      stop: (id: string) => invoke(IPC.FIND_STOP, id),
       onResult: (
         handler: (r: { tabId: string; activeMatchOrdinal: number; matches: number }) => void,
       ): Unsubscribe =>
         on<{ tabId: string; activeMatchOrdinal: number; matches: number }>(IPC.FIND_RESULT, handler),
     },
     zoom: {
-      adjust: (id: string, delta: number) => ipcRenderer.invoke(IPC.ZOOM_ADJUST, id, delta),
-      reset: (id: string) => ipcRenderer.invoke(IPC.ZOOM_RESET, id),
+      adjust: (id: string, delta: number) => invoke(IPC.ZOOM_ADJUST, id, delta),
+      reset: (id: string) => invoke(IPC.ZOOM_RESET, id),
     },
     downloads: {
-      list: (): Promise<DownloadItem[]> => ipcRenderer.invoke(IPC.DOWNLOADS_LIST),
-      open: (id: string) => ipcRenderer.invoke(IPC.DOWNLOAD_OPEN, id),
-      openFolder: (id: string) => ipcRenderer.invoke(IPC.DOWNLOAD_OPEN_FOLDER, id),
-      cancel: (id: string) => ipcRenderer.invoke(IPC.DOWNLOAD_CANCEL, id),
-      pause: (id: string) => ipcRenderer.invoke(IPC.DOWNLOAD_PAUSE, id),
-      resume: (id: string) => ipcRenderer.invoke(IPC.DOWNLOAD_RESUME, id),
-      remove: (id: string) => ipcRenderer.invoke(IPC.DOWNLOAD_REMOVE, id),
-      clear: () => ipcRenderer.invoke(IPC.DOWNLOAD_CLEAR),
+      list: (): Promise<DownloadItem[]> => invoke(IPC.DOWNLOADS_LIST),
+      open: (id: string) => invoke(IPC.DOWNLOAD_OPEN, id),
+      openFolder: (id: string) => invoke(IPC.DOWNLOAD_OPEN_FOLDER, id),
+      cancel: (id: string) => invoke(IPC.DOWNLOAD_CANCEL, id),
+      pause: (id: string) => invoke(IPC.DOWNLOAD_PAUSE, id),
+      resume: (id: string) => invoke(IPC.DOWNLOAD_RESUME, id),
+      remove: (id: string) => invoke(IPC.DOWNLOAD_REMOVE, id),
+      clear: () => invoke(IPC.DOWNLOAD_CLEAR),
       onChanged: (handler: (items: DownloadItem[]) => void): Unsubscribe =>
         on<DownloadItem[]>(IPC.DOWNLOADS_CHANGED, handler),
     },
     history: {
       list: (limit?: number, offset?: number): Promise<HistoryEntry[]> =>
-        ipcRenderer.invoke(IPC.HISTORY_LIST, limit, offset),
+        invoke(IPC.HISTORY_LIST, limit, offset),
       search: (query: string, limit?: number): Promise<HistoryEntry[]> =>
-        ipcRenderer.invoke(IPC.HISTORY_SEARCH, query, limit),
+        invoke(IPC.HISTORY_SEARCH, query, limit),
       topSites: (limit?: number): Promise<HistoryEntry[]> =>
-        ipcRenderer.invoke(IPC.HISTORY_TOP_SITES, limit),
-      delete: (id: string) => ipcRenderer.invoke(IPC.HISTORY_DELETE, id),
-      clear: () => ipcRenderer.invoke(IPC.HISTORY_CLEAR),
+        invoke(IPC.HISTORY_TOP_SITES, limit),
+      delete: (id: string) => invoke(IPC.HISTORY_DELETE, id),
+      clear: () => invoke(IPC.HISTORY_CLEAR),
     },
     bookmarks: {
-      list: (): Promise<Bookmark[]> => ipcRenderer.invoke(IPC.BOOKMARKS_LIST),
+      list: (): Promise<Bookmark[]> => invoke(IPC.BOOKMARKS_LIST),
       listFolders: (): Promise<BookmarkFolder[]> =>
-        ipcRenderer.invoke(IPC.BOOKMARKS_FOLDERS_LIST),
+        invoke(IPC.BOOKMARKS_FOLDERS_LIST),
       add: (payload: {
         url: string;
         title: string;
         faviconUrl: string | null;
         folderId?: string | null;
-      }): Promise<Bookmark> => ipcRenderer.invoke(IPC.BOOKMARKS_ADD, payload),
-      remove: (id: string) => ipcRenderer.invoke(IPC.BOOKMARKS_REMOVE, id),
+      }): Promise<Bookmark> => invoke(IPC.BOOKMARKS_ADD, payload),
+      remove: (id: string) => invoke(IPC.BOOKMARKS_REMOVE, id),
       update: (id: string, patch: Partial<Omit<Bookmark, 'id'>>) =>
-        ipcRenderer.invoke(IPC.BOOKMARKS_UPDATE, id, patch),
+        invoke(IPC.BOOKMARKS_UPDATE, id, patch),
       move: (id: string, folderId: string | null) =>
-        ipcRenderer.invoke(IPC.BOOKMARKS_MOVE, id, folderId),
+        invoke(IPC.BOOKMARKS_MOVE, id, folderId),
       reorderMixed: (container: string | null, items: MixedItemRef[]) =>
-        ipcRenderer.invoke(IPC.BOOKMARKS_REORDER_MIXED, container, items),
+        invoke(IPC.BOOKMARKS_REORDER_MIXED, container, items),
       addFolder: (name: string, parentId?: string | null): Promise<BookmarkFolder> =>
-        ipcRenderer.invoke(IPC.BOOKMARKS_FOLDER_ADD, name, parentId ?? null),
+        invoke(IPC.BOOKMARKS_FOLDER_ADD, name, parentId ?? null),
       renameFolder: (id: string, name: string) =>
-        ipcRenderer.invoke(IPC.BOOKMARKS_FOLDER_RENAME, id, name),
-      removeFolder: (id: string) => ipcRenderer.invoke(IPC.BOOKMARKS_FOLDER_REMOVE, id),
+        invoke(IPC.BOOKMARKS_FOLDER_RENAME, id, name),
+      removeFolder: (id: string) => invoke(IPC.BOOKMARKS_FOLDER_REMOVE, id),
       moveFolder: (id: string, parentId: string | null) =>
-        ipcRenderer.invoke(IPC.BOOKMARKS_FOLDER_MOVE, id, parentId),
+        invoke(IPC.BOOKMARKS_FOLDER_MOVE, id, parentId),
       findByUrl: (url: string): Promise<Bookmark | null> =>
-        ipcRenderer.invoke(IPC.BOOKMARKS_FIND_BY_URL, url),
+        invoke(IPC.BOOKMARKS_FIND_BY_URL, url),
       onChanged: (handler: (payload: BookmarksChangedPayload) => void): Unsubscribe =>
         on<BookmarksChangedPayload>(IPC.BOOKMARKS_CHANGED, handler),
     },
     settings: {
-      get: (): Promise<AppSettings> => ipcRenderer.invoke(IPC.SETTINGS_GET),
+      get: (): Promise<AppSettings> => invoke(IPC.SETTINGS_GET),
       update: (patch: Partial<AppSettings>): Promise<AppSettings> =>
-        ipcRenderer.invoke(IPC.SETTINGS_UPDATE, patch),
+        invoke(IPC.SETTINGS_UPDATE, patch),
       onChanged: (handler: (settings: AppSettings) => void): Unsubscribe =>
         on<AppSettings>(IPC.SETTINGS_CHANGED, handler),
     },
     stream: {
-      get: (): Promise<StreamModeConfig> => ipcRenderer.invoke(IPC.STREAM_GET_CONFIG),
+      get: (): Promise<StreamModeConfig> => invoke(IPC.STREAM_GET_CONFIG),
       update: (patch: Partial<StreamModeConfig>): Promise<StreamModeConfig> =>
-        ipcRenderer.invoke(IPC.STREAM_UPDATE_CONFIG, patch),
-      toggle: (): Promise<StreamModeConfig> => ipcRenderer.invoke(IPC.STREAM_TOGGLE),
+        invoke(IPC.STREAM_UPDATE_CONFIG, patch),
+      toggle: (): Promise<StreamModeConfig> => invoke(IPC.STREAM_TOGGLE),
       /**
        * Panic: curtain every window + mute everything + arm the stream;
        * second call restores (the stream stays armed on purpose). Same action
        * the system-wide hotkey triggers.
        */
-      panic: (): Promise<{ active: boolean }> => ipcRenderer.invoke(IPC.STREAM_PANIC),
+      panic: (): Promise<{ active: boolean }> => invoke(IPC.STREAM_PANIC),
       onChanged: (handler: (config: StreamModeConfig) => void): Unsubscribe =>
         on<StreamModeConfig>(IPC.STREAM_CONFIG_CHANGED, handler),
     },
     capture: {
-      /** Main pushes the screen-share picker (our own, not Chromium's). */
+      /**
+       * Main pushes the screen-share picker (our own, not Chromium's). The
+       * pick IS the capture consent: `origin` names the requesting site ('' when
+       * the chrome UI itself asked).
+       */
       onPickerShow: (
         handler: (payload: {
           pickId: string;
+          origin: string;
           sources: Array<{
             id: string;
             name: string;
@@ -178,6 +198,7 @@ export function buildVoksaApi() {
       ): Unsubscribe =>
         on<{
           pickId: string;
+          origin: string;
           sources: Array<{
             id: string;
             name: string;
@@ -190,11 +211,11 @@ export function buildVoksaApi() {
       pick: (pickId: string, sourceId: string | null) =>
         ipcRenderer.send(IPC.CAPTURE_PICKER_PICK, { pickId, sourceId }),
       /**
-       * Debug/test only: drive the handshake without Chromium's getDisplayMedia
-       * (which does not route to our handler under CDP). Resolves with the
+       * Debug/test only: drive the chrome-UI picker path of the handshake (the
+       * web path is driven for real through getDisplayMedia). Resolves with the
        * delivered source id, or null. No-op (null) in production builds.
        */
-      simulate: (): Promise<string | null> => ipcRenderer.invoke(IPC.CAPTURE_SIMULATE),
+      simulate: (): Promise<string | null> => invoke(IPC.CAPTURE_SIMULATE),
     },
     preflight: {
       /** Scan this window's tabs for what a viewer could catch before going live. */
@@ -204,69 +225,69 @@ export function buildVoksaApi() {
           | { kind: 'sensitive-text'; tabId: string; label: string; where: 'title' | 'url' | 'both' }
           | { kind: 'audible'; tabId: string; label: string }
         >;
-      }> => ipcRenderer.invoke(IPC.PREFLIGHT_RUN),
+      }> => invoke(IPC.PREFLIGHT_RUN),
     },
     suggestions: {
       query: (q: string, engine?: string): Promise<Suggestion[]> =>
-        ipcRenderer.invoke(IPC.SUGGESTIONS_QUERY, q, engine),
+        invoke(IPC.SUGGESTIONS_QUERY, q, engine),
     },
     pageMenu: {
       onShow: (handler: (payload: PageMenuPayload) => void): Unsubscribe =>
         on<PageMenuPayload>(IPC.PAGE_MENU_SHOW, handler),
       onClose: (handler: () => void): Unsubscribe => on<void>(IPC.PAGE_MENU_CLOSE, handler),
       action: (token: number, action: string, arg?: number | string) =>
-        ipcRenderer.invoke(IPC.PAGE_MENU_ACTION, token, action, arg),
+        invoke(IPC.PAGE_MENU_ACTION, token, action, arg),
     },
     updates: {
-      getState: (): Promise<UpdateState> => ipcRenderer.invoke(IPC.UPDATES_GET_STATE),
-      check: (): Promise<UpdateState> => ipcRenderer.invoke(IPC.UPDATES_CHECK),
-      install: (): Promise<void> => ipcRenderer.invoke(IPC.UPDATES_INSTALL),
+      getState: (): Promise<UpdateState> => invoke(IPC.UPDATES_GET_STATE),
+      check: (): Promise<UpdateState> => invoke(IPC.UPDATES_CHECK),
+      install: (): Promise<void> => invoke(IPC.UPDATES_INSTALL),
       onChanged: (handler: (state: UpdateState) => void): Unsubscribe =>
         on<UpdateState>(IPC.UPDATES_STATE_CHANGED, handler),
     },
     print: {
       printers: (tabId: string): Promise<PrinterInfo[]> =>
-        ipcRenderer.invoke(IPC.PRINT_LIST_PRINTERS, tabId),
+        invoke(IPC.PRINT_LIST_PRINTERS, tabId),
       preview: (tabId: string, opts: PrintPreviewOptions): Promise<string | null> =>
-        ipcRenderer.invoke(IPC.PRINT_PREVIEW, tabId, opts),
+        invoke(IPC.PRINT_PREVIEW, tabId, opts),
       execute: (tabId: string, opts: PrintExecuteOptions): Promise<PrintExecuteResult> =>
-        ipcRenderer.invoke(IPC.PRINT_EXECUTE, tabId, opts),
+        invoke(IPC.PRINT_EXECUTE, tabId, opts),
     },
     extensions: {
-      list: (): Promise<ExtensionInfo[]> => ipcRenderer.invoke(IPC.EXTENSIONS_LIST),
+      list: (): Promise<ExtensionInfo[]> => invoke(IPC.EXTENSIONS_LIST),
       uninstall: (id: string): Promise<void> =>
-        ipcRenderer.invoke(IPC.EXTENSIONS_UNINSTALL, id),
+        invoke(IPC.EXTENSIONS_UNINSTALL, id),
       reorder: (ids: string[]): Promise<void> =>
-        ipcRenderer.invoke(IPC.EXTENSIONS_REORDER, ids),
+        invoke(IPC.EXTENSIONS_REORDER, ids),
       onChanged: (handler: (list: ExtensionInfo[]) => void): Unsubscribe =>
         on<ExtensionInfo[]>(IPC.EXTENSIONS_CHANGED, handler),
     },
     app: {
-      openDevTools: () => ipcRenderer.invoke(IPC.APP_OPEN_DEVTOOLS),
-      openExternal: (url: string) => ipcRenderer.invoke(IPC.APP_OPEN_EXTERNAL, url),
-      getHostname: (): Promise<string> => ipcRenderer.invoke(IPC.APP_GET_HOSTNAME),
+      openDevTools: () => invoke(IPC.APP_OPEN_DEVTOOLS),
+      openExternal: (url: string) => invoke(IPC.APP_OPEN_EXTERNAL, url),
+      getHostname: (): Promise<string> => invoke(IPC.APP_GET_HOSTNAME),
       /** Is Voksa the OS handler for http/https? Always false in dev builds. */
       defaultBrowserState: (): Promise<{ packaged: boolean; isDefault: boolean }> =>
-        ipcRenderer.invoke(IPC.APP_DEFAULT_BROWSER_STATE),
+        invoke(IPC.APP_DEFAULT_BROWSER_STATE),
       /**
        * Ask to become the default browser. macOS/Linux register directly (the
        * OS may confirm); Windows opens Settings > Default apps, where the
        * user picks Voksa (no programmatic claim exists there).
        */
       setDefaultBrowser: (): Promise<{ packaged: boolean; isDefault: boolean }> =>
-        ipcRenderer.invoke(IPC.APP_SET_DEFAULT_BROWSER),
-      setTheme: (theme: 'light' | 'dark') => ipcRenderer.invoke(IPC.APP_SET_THEME, theme),
+        invoke(IPC.APP_SET_DEFAULT_BROWSER),
+      setTheme: (theme: 'light' | 'dark') => invoke(IPC.APP_SET_THEME, theme),
       clearBrowsingData: (opts: ClearBrowsingDataOptions) =>
-        ipcRenderer.invoke(IPC.APP_CLEAR_BROWSING_DATA, opts),
+        invoke(IPC.APP_CLEAR_BROWSING_DATA, opts),
     },
     window: {
       /** Open a brand-new browser window (fresh tab, cascaded position). */
-      openNew: (): Promise<void> => ipcRenderer.invoke(IPC.WINDOW_NEW),
-      minimize: () => ipcRenderer.invoke(IPC.WINDOW_MINIMIZE),
-      maximize: () => ipcRenderer.invoke(IPC.WINDOW_MAXIMIZE),
-      close: () => ipcRenderer.invoke(IPC.WINDOW_CLOSE),
+      openNew: (): Promise<void> => invoke(IPC.WINDOW_NEW),
+      minimize: () => invoke(IPC.WINDOW_MINIMIZE),
+      maximize: () => invoke(IPC.WINDOW_MAXIMIZE),
+      close: () => invoke(IPC.WINDOW_CLOSE),
       getState: (): Promise<{ maximized: boolean; minimized: boolean; fullscreen: boolean }> =>
-        ipcRenderer.invoke(IPC.WINDOW_STATE),
+        invoke(IPC.WINDOW_STATE),
       onStateChanged: (
         handler: (state: { maximized: boolean; minimized: boolean; fullscreen: boolean }) => void,
       ): Unsubscribe =>
@@ -304,7 +325,7 @@ export function buildVoksaApi() {
           hasBookmarks: boolean;
           hasHistory: boolean;
         }>
-      > => ipcRenderer.invoke(IPC.IMPORT_SOURCES),
+      > => invoke(IPC.IMPORT_SOURCES),
       /** Run an import. Bookmarks land in a dedicated folder; passwords never move. */
       run: (selection: {
         sourceId: string;
@@ -319,7 +340,7 @@ export function buildVoksaApi() {
             folderName: string | null;
           }
         | { ok: false; error: 'source-gone' | 'locked' | 'nothing-selected' | 'read-failed' }
-      > => ipcRenderer.invoke(IPC.IMPORT_RUN, selection),
+      > => invoke(IPC.IMPORT_RUN, selection),
     },
     auth: {
       /** HTTP authentication challenges (Basic/Digest/proxy) for this window. */

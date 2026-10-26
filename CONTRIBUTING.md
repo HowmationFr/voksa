@@ -4,12 +4,12 @@ Thanks for wanting to contribute! Voksa is a privacy-focused Electron browser wh
 
 ## Quick start
 
-Prerequisites: Node 20+, Git. On Windows you also need the C++ build tools (the "tools" option of the Node installer) to compile better-sqlite3.
+Prerequisites: Node 22.12+, Git, and a C++ build toolchain: the C++ build tools on Windows (the "tools" option of the Node installer), the Xcode Command Line Tools on macOS (`xcode-select --install`), `make`, `g++` and `python3` on Linux (e.g. `build-essential`). better-sqlite3 ships prebuilt N-API binaries for Windows, macOS and Linux (x64 and arm64), so nothing is compiled, but npm still runs node-gyp on it during install (its default for a package with a `binding.gyp`), and node-gyp needs Python 3 and the platform build tool even when it builds nothing. Where no prebuild matches, that same step compiles it.
 
 ```bash
 git clone https://github.com/<your-fork>/voksa.git
 cd voksa
-npm install        # also applies patches/ (patch-package) and rebuilds better-sqlite3
+npm install        # also applies patches/ (patch-package; fails if a patch no longer applies)
 npm run dev        # esbuild watch + vite + electron
 ```
 
@@ -45,4 +45,4 @@ Releases are cut by maintainers from `main`: a `vX.Y.Z` tag (derived from the `p
 
 ## License
 
-The project is licensed under **GPL-3.0** (required in particular by the GPL option of `electron-chrome-extensions`). By contributing you agree that your code is distributed under this license.
+The project is licensed under **GPL-3.0**. By contributing you agree that your code is distributed under this license.

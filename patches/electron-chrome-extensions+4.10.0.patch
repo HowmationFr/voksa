@@ -1,5 +1,5 @@
 diff --git a/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js b/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js
-index 67d3be4..d702890 100644
+index 67d3be4..7d626a9 100644
 --- a/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js
 +++ b/node_modules/electron-chrome-extensions/dist/chrome-extension-api.preload.js
 @@ -14,6 +14,10 @@
@@ -13,7 +13,91 @@ index 67d3be4..d702890 100644
    var addExtensionListener = (extensionId, name, callback) => {
      const listenerCount = listenerMap.get(name) || 0;
      if (listenerCount === 0) {
-@@ -365,7 +369,59 @@
+@@ -21,7 +25,10 @@
+     }
+     listenerMap.set(name, listenerCount + 1);
+     import_electron.ipcRenderer.addListener(formatIpcName(name), function(event, ...args) {
+-      if (true) {
++      // PATCH(voksa): upstream's development logging, folded to `if (true)` by
++      // its build; it printed every relayed payload (storage values included)
++      // to each extension's console.
++      if (false) {
+         console.log(name, "(result)", ...args);
+       }
+       callback(...args);
+@@ -44,7 +51,7 @@
+   var injectExtensionAPIs = () => {
+     const invokeExtension = async function(extensionId, fnName, options = {}, ...args) {
+       const callback = typeof args[args.length - 1] === "function" ? args.pop() : void 0;
+-      if (true) {
++      if (false) { // PATCH(voksa): see addExtensionListener
+         console.log(fnName, args);
+       }
+       if (options.noop) {
+@@ -62,7 +69,7 @@
+         console.error(e);
+         result = void 0;
+       }
+-      if (true) {
++      if (false) { // PATCH(voksa): see addExtensionListener
+         console.log(fnName, "(result)", result);
+       }
+       if (callback) {
+@@ -117,18 +124,41 @@
+       class ExtensionEvent {
+         constructor(name) {
+           this.name = name;
++          // PATCH(voksa): keep the listeners HERE, in the main world. The
++          // bridge hands the preload a fresh proxy per call and its
++          // removeExtensionListener removes that callback, not the wrapper
++          // it registered: removeListener was a no-op and has*() threw
++          // (since the storage hunk, chrome.storage.onChanged is one of
++          // these events, where the native methods used to work). One bridge
++          // subscription per event, attached on first use and kept:
++          // detaching would leak the preload-side wrapper anyway.
++          this._listeners = /* @__PURE__ */ new Set();
++          this._attached = false;
+         }
+         addListener(callback) {
+-          electron.addExtensionListener(extensionId, this.name, callback);
++          if (typeof callback !== "function") return;
++          this._listeners.add(callback);
++          if (this._attached) return;
++          this._attached = true;
++          electron.addExtensionListener(extensionId, this.name, (...args) => {
++            for (const listener of [...this._listeners]) {
++              try {
++                listener(...args);
++              } catch (e) {
++                // like Chrome: one throwing listener does not starve the others
++                console.error(e);
++              }
++            }
++          });
+         }
+         removeListener(callback) {
+-          electron.removeExtensionListener(extensionId, this.name, callback);
++          this._listeners.delete(callback);
+         }
+         getRules(ruleIdentifiers, callback) {
+           throw new Error("Method not implemented.");
+         }
+         hasListener(callback) {
+-          throw new Error("Method not implemented.");
++          return this._listeners.has(callback);
+         }
+         removeRules(ruleIdentifiers, callback) {
+           throw new Error("Method not implemented.");
+@@ -137,7 +167,7 @@
+           throw new Error("Method not implemented.");
+         }
+         hasListeners() {
+-          throw new Error("Method not implemented.");
++          return this._listeners.size > 0;
+         }
+       }
+       class ChromeSetting {
+@@ -365,7 +395,76 @@
            shouldInject: () => manifest.manifest_version === 3,
            factory: (base) => {
              if (base.getMessage) {
@@ -24,9 +108,13 @@ index 67d3be4..d702890 100644
 +              // language with English messages). Resolve the right
 +              // _locales/<lang>/messages.json ourselves, and fall back to
 +              // the native bundle for any missing key (partial translations
-+              // must not lose their default-locale strings). The catalog
-+              // fetch is async: a getMessage call racing it gets the native
-+              // (default-locale) string, which is the pre-patch behaviour.
++              // must not lose their default-locale strings). Resolution
++              // follows Chromium's message_bundle.cc: message names and
++              // placeholder names are case-insensitive, and a region catalog
++              // (fr_FR) falls back key by key to its language (fr). The
++              // catalog fetch is async: a getMessage call racing it gets the
++              // native (default-locale) string, which is the pre-patch
++              // behaviour.
 +              const state = { map: null };
 +              const uiLang = (() => {
 +                try {
@@ -42,39 +130,52 @@ index 67d3be4..d702890 100644
 +              push(uiLang.replace(/-/g, "_"));
 +              push(uiLang.split(/[-_]/)[0]);
 +              (async () => {
-+                for (const cand of candidates) {
++                // Least specific first, so the region catalog wins key by key.
++                const merged = {};
++                let found = false;
++                for (const cand of [...candidates].reverse()) {
 +                  try {
 +                    const res = await fetch(`/_locales/${cand}/messages.json`);
 +                    if (res.ok) {
-+                      state.map = await res.json();
-+                      return;
++                      const raw = await res.json();
++                      for (const k of Object.keys(raw || {})) merged[k.toLowerCase()] = raw[k];
++                      found = true;
 +                    }
 +                  } catch (e) {
 +                    // locale dir absent: try the next candidate
 +                  }
 +                }
++                if (found) state.map = merged;
 +              })();
-+              const localizedGetMessage = (messageName, substitutions) => {
-+                const entry = state.map ? state.map[messageName] : null;
-+                if (!entry || typeof entry.message !== "string" || messageName.startsWith("@@")) {
-+                  return base.getMessage(messageName, substitutions);
++              const localizedGetMessage = (messageName, substitutions, options) => {
++                const key = typeof messageName === "string" ? messageName.toLowerCase() : "";
++                const entry = state.map ? state.map[key] : null;
++                if (!entry || typeof entry.message !== "string" || key.startsWith("@@")) {
++                  return base.getMessage(messageName, substitutions, options);
 +                }
-+                let msg = entry.message;
++                const placeholders = {};
 +                if (entry.placeholders) {
 +                  for (const ph of Object.keys(entry.placeholders)) {
-+                    const content = entry.placeholders[ph] && entry.placeholders[ph].content || "";
-+                    msg = msg.split("$" + ph.toUpperCase() + "$").join(content);
++                    placeholders[ph.toLowerCase()] = entry.placeholders[ph] && entry.placeholders[ph].content || "";
 +                  }
 +                }
 +                const subs = substitutions == null ? [] : [].concat(substitutions);
-+                msg = msg.replace(/\$(\d)/g, (m, i) => String(subs[Number(i) - 1] ?? ""));
-+                return msg.replace(/\$\$/g, "$");
++                const fill = (text) => text.replace(/\$\$|\$(\d)/g, (m, i) => m === "$$" ? "$" : String(subs[Number(i) - 1] ?? ""));
++                // Chromium's order: $name$ placeholders (their content may use
++                // $1..$9), then escapeLt, then $n / $$ in one pass (so "$$1"
++                // stays a literal "$1" and substitutions are never escaped).
++                let msg = entry.message.replace(/\$([A-Za-z0-9_@]+)\$/g, (m, name) => {
++                  const lower = name.toLowerCase();
++                  return Object.prototype.hasOwnProperty.call(placeholders, lower) ? placeholders[lower] : m;
++                });
++                if (options && typeof options === "object" && options.escapeLt === true) msg = msg.replace(/</g, "&lt;");
++                return fill(msg);
 +              };
 +              return { ...base, getMessage: localizedGetMessage };
              }
              return {
                ...base,
-@@ -449,12 +505,107 @@
+@@ -449,12 +548,107 @@
          },
          storage: {
            factory: (base) => {
@@ -184,7 +285,7 @@ index 67d3be4..d702890 100644
              };
            }
          },
-@@ -555,6 +706,7 @@
+@@ -555,6 +749,7 @@
            }
          }
        };
@@ -192,7 +293,7 @@ index 67d3be4..d702890 100644
        Object.keys(apiDefinitions).forEach((key) => {
          const apiName = key;
          const baseApi = chrome[apiName];
-@@ -565,8 +717,45 @@
+@@ -565,8 +760,45 @@
            enumerable: true,
            configurable: true
          });
@@ -256,10 +357,10 @@ index c20b7dc..8a3d880 100644
          this.updateIcon(info);
          if (info.text) {
 diff --git a/node_modules/electron-chrome-extensions/dist/cjs/index.js b/node_modules/electron-chrome-extensions/dist/cjs/index.js
-index b4242b0..4511312 100644
+index a91ca8f..b16e873 100644
 --- a/node_modules/electron-chrome-extensions/dist/cjs/index.js
 +++ b/node_modules/electron-chrome-extensions/dist/cjs/index.js
-@@ -2383,6 +2383,20 @@ var ExtensionRouter = class {
+@@ -2388,6 +2388,20 @@ var ExtensionRouter = class {
          }
        }
      );
@@ -298,10 +399,10 @@ index cc2e3ec..89720e0 100644
          this.updateIcon(info);
          if (info.text) {
 diff --git a/node_modules/electron-chrome-extensions/dist/esm/index.mjs b/node_modules/electron-chrome-extensions/dist/esm/index.mjs
-index dc598ce..c9f250b 100644
+index 4392922..96aaa97 100644
 --- a/node_modules/electron-chrome-extensions/dist/esm/index.mjs
 +++ b/node_modules/electron-chrome-extensions/dist/esm/index.mjs
-@@ -2346,6 +2346,20 @@ var ExtensionRouter = class {
+@@ -2351,6 +2351,20 @@ var ExtensionRouter = class {
          }
        }
      );

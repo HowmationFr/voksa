@@ -5,5 +5,8 @@ export default defineConfig({
     environment: 'node',
     include: ['src/**/*.{test,spec}.ts'],
     globals: false,
+    // webstorePatch.test.ts mocks 'electron' INSIDE the library's ESM build:
+    // vi.mock only reaches modules Vite processes, not externalized deps.
+    server: { deps: { inline: ['electron-chrome-web-store'] } },
   },
 });

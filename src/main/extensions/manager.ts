@@ -1,6 +1,7 @@
 import { session, type Extension } from 'electron';
 import { getSettings, setSettings } from '../storage/settings';
 import type { ExtensionInfo } from '../../shared/types';
+import { isValidExtensionId } from './webstoreGuards';
 
 export type { ExtensionInfo };
 
@@ -94,8 +95,15 @@ export function reorderExtensions(ids: string[]): void {
  * extension wasn't installed via the web store, we fall back to
  * `session.extensions.removeExtension()`, which unloads it but leaves files
  * around.
+ *
+ * The id is joined into a path under userData/Extensions by the library
+ * (rm -rf): anything but a real extension id ("../../Documents") is refused
+ * before either path runs.
  */
 export async function uninstallExtensionById(id: string): Promise<void> {
+  if (!isValidExtensionId(id)) {
+    throw new Error('uninstallExtensionById: invalid extension id');
+  }
   try {
     const mod = await import('electron-chrome-web-store');
     if (typeof mod.uninstallExtension === 'function') {

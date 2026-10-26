@@ -7,7 +7,8 @@
 //   4. REAL PAGE LOADS: a tab opened via voksa.tabs.create renders a local
 //      leak-probe page (email + public IP + same-origin iframe), stream OFF.
 //   5. FINGERPRINT: navigator.webdriver undefined, window.chrome present,
-//      Chrome UA without Electron/Firefox/Voksa markers.
+//      Chrome UA without Electron/Firefox/Voksa markers, and no Chrome Web
+//      Store API (electronWebstore...) on a non-store page or its iframe.
 //   6. STREAM MASKS LIVE PAGES: enabling Stream Mode scrubs the email/IP from
 //      the live DOM (top document AND iframe) without leaving the page
 //      shrouded (documentElement opacity back to 1).
@@ -919,6 +920,10 @@ async function main() {
     webdriver: typeof navigator.webdriver === 'undefined' ? 'undefined' : String(navigator.webdriver),
     chrome: !!window.chrome,
     ua: navigator.userAgent,
+    webstoreApi: [window, ...Array.from(window.frames)].flatMap((w) =>
+      ['electronWebstore', 'electronRuntime', 'electronManagement'].filter((k) => k in w),
+    ),
+    frames: window.frames.length,
   })`);
   if (fp.webdriver !== 'undefined') {
     throw new Error(
@@ -930,6 +935,18 @@ async function main() {
   }
   if (!fp.ua.includes('Chrome/') || /Electron|Firefox|Voksa/.test(fp.ua)) {
     throw new Error(`user agent leaks the embedded browser: "${fp.ua}"; check src/main/ua.ts`);
+  }
+  // The store preload runs in every frame of the session; only the exact
+  // https://chromewebstore.google.com origin may get its install/uninstall
+  // API (patches/electron-chrome-web-store+0.13.0.patch). The probe iframe is
+  // same-origin, so it is checked too (frames >= 1 keeps that honest).
+  if (fp.frames < 1) {
+    throw new Error('probe page has no iframe; the Web Store API check would skip subframes');
+  }
+  if (fp.webstoreApi.length > 0) {
+    throw new Error(
+      `a non-store page got the Chrome Web Store API (${fp.webstoreApi.join(', ')}); check patches/electron-chrome-web-store+0.13.0.patch`,
+    );
   }
   pass('FINGERPRINT');
 

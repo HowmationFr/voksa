@@ -2970,6 +2970,19 @@ async function main() {
       'before its first load: TabManager.adoptPopup',
   });
   await extWebWindow.evaluate(`setTimeout(() => window.close(), 0), true`);
+  // Both windows must be GONE before (c): an action popup closes as soon as it
+  // loses focus to another Voksa window (electron-chrome-extensions
+  // PopupView.maybeClose, Chrome's behaviour too), and on macOS a window
+  // closing hands the focus back asynchronously, so a close still in flight
+  // can take it from the popup that just opened.
+  await waitFor(
+    'chrome.windows.create popups closed',
+    async () =>
+      !(await listTargets()).some((t) => t.type === 'page' && [vaultWindowUrl, extWebUrl].includes(t.url)),
+    STEP_TIMEOUT_MS,
+    'a chrome.windows.create popup survived window.close()',
+  );
+  await sleep(300); // let the OS settle the focus the closed windows released
 
   // (c) The toolbar action popup, opened through the real UI path (the
   //     <button is="browser-action"> the chrome UI renders for the fixture).

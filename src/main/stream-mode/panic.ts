@@ -17,8 +17,11 @@
  *  - The ACTION is this controller's toggle(), reachable over IPC too: the
  *    hotkey is just one trigger, which is what makes the behaviour testable
  *    (CDP cannot synthesize OS-level global shortcuts).
- *  - Wayland does not deliver global shortcuts to unprivileged apps; the
- *    hotkey silently cannot work there (the IPC path still does).
+ *  - Wayland: since Electron 45, GNOME binds global shortcuts through the xdg
+ *    GlobalShortcuts portal, which shows a consent dialog the first time
+ *    (registration is lazy, so: the first time Stream Mode turns on). Other
+ *    Wayland compositors still deliver no global shortcuts to unprivileged
+ *    apps; there the hotkey silently cannot work (the IPC path still does).
  */
 import { globalShortcut } from 'electron';
 import { allWindows } from '../windows';

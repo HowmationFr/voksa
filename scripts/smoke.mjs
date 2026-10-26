@@ -279,7 +279,7 @@ async function waitFor(what, fn, timeoutMs = BOOT_TIMEOUT_MS, hint = '') {
 
 // ---------------------------------------------------------------------------
 // Minimal CDP client over WebSocket. Prefers the global WebSocket (Node 22+),
-// falls back to the `ws` devDependency on Node 20 CI runners.
+// falls back to the `ws` devDependency where WebSocket is not global.
 // ---------------------------------------------------------------------------
 
 function openNativeSocket(url) {

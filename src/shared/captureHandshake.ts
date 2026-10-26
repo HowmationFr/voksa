@@ -24,10 +24,13 @@ export type PickerSource = {
  * about to be armed. Withhold those unconditionally: the picker shows a
  * neutral tile for Voksa surfaces, the real (masked) content only appears once
  * the capture actually starts. Non-Voksa windows (a game, a Zoom window) keep
- * their thumbnail: nothing of ours is in them.
+ * their thumbnail: nothing of ours is in them, UNLESS Stream Mode is on. The
+ * picker is itself on screen, hence on the stream, and any foreground page can
+ * raise it (legacy getUserMedia needs no click): then every tile is neutral,
+ * or a page could paint the user's other windows onto the live stream.
  */
-export function thumbnailIsSafe(containsVoksa: boolean): boolean {
-  return !containsVoksa;
+export function thumbnailIsSafe(containsVoksa: boolean, streaming: boolean): boolean {
+  return !containsVoksa && !streaming;
 }
 
 /**

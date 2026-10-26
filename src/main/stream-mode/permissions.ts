@@ -117,7 +117,9 @@ export function installPermissionHandlers(session: Session, deps: PermissionDeps
       const d = details as
         { requestingUrl?: string; securityOrigin?: string; isMainFrame?: boolean } | undefined;
       const requestingUrl = d?.requestingUrl ?? (wc ? wc.getURL() : '');
-      const origin = safeOrigin(requestingUrl);
+      // securityOrigin first: an about:blank / srcdoc child reports its own
+      // URL as requestingUrl but carries its creator's (real) origin here.
+      const origin = safeOrigin(d?.securityOrigin) || safeOrigin(requestingUrl);
       if (!wc || (origin && deps.getRemembered(origin, permission) === 'deny')) {
         callback(false);
         return;

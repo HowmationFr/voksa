@@ -2006,6 +2006,9 @@ async function main() {
         throw new Error(`cancelling the gate picker must deny getDisplayMedia (got ${JSON.stringify(r)})`);
       }
     } else {
+      const pickedVoksa = await ui.evaluate(
+        `document.querySelector('[data-voksa-capture-source]').getAttribute('data-voksa-capture-contains-voksa') === 'true'`,
+      );
       await pickFirstSource();
       await waitFor(
         'getDisplayMedia received the picked source',
@@ -2016,12 +2019,28 @@ async function main() {
       if (output.slice(mark).includes(CAPTURE_LEGACY_BLOCKED)) {
         throw new Error('getDisplayMedia was classified as the legacy getUserMedia path (its tab was killed)');
       }
+      // The guarantee on the real path: a Voksa surface is armed BEFORE the
+      // grant, so Stream Mode is on by the time the source was delivered.
+      if (pickedVoksa && !(await ui.evaluate(`window.voksa.stream.get()`))?.enabled) {
+        throw new Error('a Voksa surface was delivered to getDisplayMedia without arming Stream Mode first');
+      }
       // A track, or the OS capturer failing to start on a headless runner;
       // never a permission denial after the user picked.
       const r = await gdm;
       if (!r?.ok && r?.name === 'NotAllowedError') {
         throw new Error(`getDisplayMedia was denied after the pick: ${JSON.stringify(r)}`);
       }
+    }
+    // Stream Mode ON: the picker is on the stream itself, so it must show no
+    // thumbnail at all (any foreground page can raise it).
+    await ui.evaluate(`window.voksa.stream.update({ enabled: true })`);
+    const live = capPage.evaluate(GET_DISPLAY_MEDIA, { userGesture: true });
+    await waitFor('getDisplayMedia raised the picker under Stream Mode', pickerOpen, STEP_TIMEOUT_MS);
+    const thumbs = await ui.evaluate(`document.querySelectorAll('[data-voksa-capture-picker] img').length`);
+    await cancelPicker();
+    await live;
+    if (thumbs > 0) {
+      throw new Error(`the capture picker painted ${thumbs} thumbnail(s) while Stream Mode was on`);
     }
     capPage.close();
     await ui.evaluate(`window.voksa.tabs.close(${J(id)})`);

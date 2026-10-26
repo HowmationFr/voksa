@@ -11,8 +11,13 @@ import {
 describe('thumbnailIsSafe', () => {
   it('withholds a Voksa surface thumbnail, keeps everything else', () => {
     // A thumbnail predates masking: a Voksa thumbnail can leak a raw email.
-    expect(thumbnailIsSafe(true)).toBe(false);
-    expect(thumbnailIsSafe(false)).toBe(true);
+    expect(thumbnailIsSafe(true, false)).toBe(false);
+    expect(thumbnailIsSafe(false, false)).toBe(true);
+  });
+
+  it('withholds EVERY thumbnail while streaming (the picker itself is on stream)', () => {
+    expect(thumbnailIsSafe(false, true)).toBe(false);
+    expect(thumbnailIsSafe(true, true)).toBe(false);
   });
 });
 

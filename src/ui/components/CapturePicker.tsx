@@ -163,6 +163,7 @@ function SourceTile({
   return (
     <button
       data-voksa-capture-source={source.id}
+      data-voksa-capture-contains-voksa={source.containsVoksa ? 'true' : 'false'}
       onClick={onSelect}
       className={`text-left rounded-xl border overflow-hidden transition-colors ${
         active ? 'border-accent ring-1 ring-accent' : 'border-border hover:bg-bg-hover'

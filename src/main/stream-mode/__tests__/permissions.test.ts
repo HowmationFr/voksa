@@ -331,6 +331,27 @@ describe('installPermissionHandlers, Stream Mode ON', () => {
     expect(allowed.gateDisplayCapture).toHaveBeenCalledOnce();
   });
 
+  it('display-capture: an about:blank child asks under its creator origin (securityOrigin)', () => {
+    // requestingUrl is the frame's own URL ('about:blank'); the remembered
+    // deny of the real origin must still apply, and the picker names it.
+    const blocked = setup({ remembered: { [ORIGIN]: { 'display-capture': 'deny' } } });
+    const details: RequestDetails = {
+      requestingUrl: 'about:blank',
+      securityOrigin: `${ORIGIN}/`,
+      isMainFrame: false,
+    };
+    expect(blocked.request('display-capture', details, PAGE_WC).granted).toBe(false);
+    expect(blocked.gateDisplayCapture).not.toHaveBeenCalled();
+
+    const open = setup();
+    open.request('display-capture', details, PAGE_WC);
+    expect(open.gateDisplayCapture).toHaveBeenCalledWith(
+      PAGE_WC,
+      expect.objectContaining({ origin: ORIGIN, requestingUrl: 'about:blank', isMainFrame: false }),
+      expect.any(Function),
+    );
+  });
+
   it('check handler: display-capture reads usable in both stream states unless blocked', () => {
     // Capability reporting only (permissions.query): a 'denied' while
     // streaming could make a meeting site hide its share button.

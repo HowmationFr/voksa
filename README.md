@@ -97,7 +97,7 @@ Voksa detects OBS, Streamlabs, XSplit and vMix, and arms itself before you even 
 <br/><br/>
 🕳️ What <b>cannot</b> be masked is <b>hidden, never shown raw</b>: a frame Chromium refuses to inject into, a PDF (painted by a plugin, unreachable by any masker)
 <br/><br/>
-🚫 <b>WebRTC blocked</b> (the classic IP leak); camera, microphone and location auto-denied; the hover bubble disappears (the hovered URL never leaves the main process); speculative connections cut (they would leak hostnames in TLS handshakes)
+🚫 <b>WebRTC never reveals your local IP</b> (the classic leak), yet WebRTC connections keep working (sharing a window in Meet, Discord or Zoom); a strict mode that also cuts non-proxied UDP is one toggle away <sub>(opt-in: calls may fail)</sub>; camera, microphone and location auto-denied; the hover bubble disappears (the hovered URL never leaves the main process); speculative connections cut (they would leak hostnames in TLS handshakes)
 <br/><br/>
 🕶️ Address-bar suggestions and new-tab top sites <b>stop drawing from your history</b> while live
 <br/><br/>

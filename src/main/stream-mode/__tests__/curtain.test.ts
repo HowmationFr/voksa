@@ -6,6 +6,7 @@ import { IPC } from '../../../shared/ipcChannels';
 // Keep in sync with the constants in curtain.ts.
 const SAFETY_TIMEOUT_MS = 6000;
 const UI_ACK_TIMEOUT_MS = 600;
+const CAPTURE_TIMEOUT_MS = 300;
 
 type SentMessage = {
   channel: string;
@@ -149,6 +150,52 @@ describe('CurtainController', () => {
       await pending;
 
       expect(h.controller.isActive('tab-1')).toBe(true);
+    });
+
+    it('a screenshot that never settles cannot hold the navigation: solid panel after the bound', async () => {
+      // capturePage has no timeout of its own; the caller's load waits on raise().
+      const h = createHarness();
+      const view = {
+        webContents: { capturePage: vi.fn(() => new Promise(() => {})) },
+      } as unknown as WebContentsView;
+      let resolved = false;
+
+      const pending = h.controller.raise('tab-1', view, 'screenshot').then(() => {
+        resolved = true;
+      });
+      // The tab is curtained (and its fail-to-blank armed) while the capture runs.
+      expect(h.controller.isActive('tab-1')).toBe(true);
+      await vi.advanceTimersByTimeAsync(CAPTURE_TIMEOUT_MS);
+      await pending;
+
+      expect(resolved).toBe(true);
+      expect(h.messages(IPC.CURTAIN_SET)[0].payload.backdrop).toBeNull();
+      expect(h.isExpanded()).toBe(true);
+    });
+
+    it('a curtain dropped during the screenshot is never painted (no stale curtain)', async () => {
+      const h = createHarness();
+      let finishCapture!: (image: unknown) => void;
+      const view = {
+        webContents: {
+          capturePage: vi.fn(
+            () =>
+              new Promise((resolve) => {
+                finishCapture = resolve;
+              }),
+          ),
+        },
+      } as unknown as WebContentsView;
+
+      const pending = h.controller.raise('tab-1', view, 'screenshot');
+      // The new document became ready (or the tab closed) before the capture came back.
+      h.controller.onReady('tab-1', null);
+      finishCapture({ isEmpty: () => false, toDataURL: () => 'data:image/png;base64,late' });
+      await pending;
+
+      expect(h.messages(IPC.CURTAIN_SET)).toHaveLength(0);
+      expect(h.controller.isActive('tab-1')).toBe(false);
+      expect(h.isExpanded()).toBe(false);
     });
   });
 

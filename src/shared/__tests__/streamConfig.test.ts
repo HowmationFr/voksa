@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_STREAM_CONFIG, sameMaskingConfig, type StreamModeConfig } from '../streamConfig';
+import {
+  DEFAULT_STREAM_CONFIG,
+  sameMaskingConfig,
+  webRtcPolicyFor,
+  type StreamModeConfig,
+} from '../streamConfig';
 
 const base = (): StreamModeConfig => ({ ...DEFAULT_STREAM_CONFIG, customMasks: ['acme'] });
 
@@ -29,5 +34,39 @@ describe('sameMaskingConfig', () => {
     const withExtra = { ...base(), futureFlag: true } as unknown as StreamModeConfig;
     expect(sameMaskingConfig(base(), withExtra)).toBe(false);
     expect(sameMaskingConfig(withExtra, base())).toBe(false);
+  });
+});
+
+describe('webRtcPolicyFor', () => {
+  const on = (patch: Partial<StreamModeConfig> = {}): StreamModeConfig => ({
+    ...DEFAULT_STREAM_CONFIG,
+    enabled: true,
+    ...patch,
+  });
+
+  it('leaves Chromium defaults alone while Stream Mode is off, whatever the toggles', () => {
+    expect(webRtcPolicyFor(DEFAULT_STREAM_CONFIG)).toBe('default');
+    expect(
+      webRtcPolicyFor({ ...DEFAULT_STREAM_CONFIG, blockWebRTC: true, strictWebRTC: true }),
+    ).toBe('default');
+  });
+
+  it('hides local addresses but keeps calls working by default under Stream Mode', () => {
+    // The default config must never pick the strict policy: it kills UDP
+    // media without a proxy, i.e. screen sharing in Meet while streaming.
+    expect(DEFAULT_STREAM_CONFIG.blockWebRTC).toBe(true);
+    expect(DEFAULT_STREAM_CONFIG.strictWebRTC).toBe(false);
+    expect(webRtcPolicyFor(on())).toBe('default_public_interface_only');
+  });
+
+  it('applies the strict policy only when opted in, and lets it win (fail closed)', () => {
+    expect(webRtcPolicyFor(on({ strictWebRTC: true }))).toBe('disable_non_proxied_udp');
+    expect(webRtcPolicyFor(on({ blockWebRTC: false, strictWebRTC: true }))).toBe(
+      'disable_non_proxied_udp',
+    );
+  });
+
+  it('falls back to the default policy when both WebRTC toggles are off', () => {
+    expect(webRtcPolicyFor(on({ blockWebRTC: false }))).toBe('default');
   });
 });

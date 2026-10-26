@@ -26,9 +26,14 @@ export const enStream: Record<string, string> = {
   'mon-pc.local → xxxxxx.local': 'my-pc.local → xxxxxx.local',
 
   // StreamPage: access mask cards
-  'Bloquer WebRTC': 'Block WebRTC',
-  'Empêche toute divulgation d’IP via WebRTC.': 'Prevents any IP disclosure through WebRTC.',
-  'RTCPeerConnection → blocked': 'RTCPeerConnection → blocked',
+  'Masquer l’IP locale (WebRTC)': 'Hide local IP (WebRTC)',
+  'Les sites ne voient plus vos adresses locales (réseau, VPN) via WebRTC. Les appels et le partage d’écran continuent de fonctionner.':
+    'Sites no longer see your local addresses (network, VPN) through WebRTC. Calls and screen sharing keep working.',
+  'candidat ICE 192.168.1.20 → retiré': 'ICE candidate 192.168.1.20 → removed',
+  'WebRTC strict': 'Strict WebRTC',
+  'Coupe l’UDP direct de WebRTC (hors proxy). Les appels et le partage d’écran peuvent échouer. Désactivé par défaut.':
+    'Cuts WebRTC’s direct UDP (outside a proxy). Calls and screen sharing may fail. Disabled by default.',
+  'UDP hors proxy → bloqué': 'non-proxied UDP → blocked',
   'Refuser la géolocalisation': 'Deny geolocation',
   'Demandes refusées sans popup visible.': 'Requests denied without a visible popup.',
   'navigator.geolocation → denied': 'navigator.geolocation → denied',

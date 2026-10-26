@@ -74,7 +74,15 @@
 //  24. GO-LIVE PREFLIGHT: a tab whose title carries an email is flagged (with
 //      a MASKED preview), a clean profile flags nothing (anti-vacuity), and
 //      the flag names a real tab id.
-//  25. NO RENDERER EXCEPTIONS: no Runtime.exceptionThrown on the chrome UI
+//  25. AUDIO ROUTING: a tab's audio routed to a chosen output device (wiring
+//      checks only, loudly logged, without a physical output device).
+//  26. EXTENSION CONTRACT: a fixture extension built to die where real ones
+//      died in the wild (MODULE service worker, tabs.query, storage relay,
+//      i18n) runs end to end.
+//  27. WEBRTC UNDER STREAM: under Stream Mode ICE gathering exposes no host
+//      candidate (no local/private address) on a tab toggled live AND on a
+//      popup born under stream; stream OFF shows them again (anti-vacuity).
+//  28. NO RENDERER EXCEPTIONS: no Runtime.exceptionThrown on the chrome UI
 //      target during the whole run.
 //
 // Catches boot crashes, preload failures, a blank chrome UI, a broken voksa
@@ -699,6 +707,86 @@ const POISON_STATE_EXPR = `(() => {
 // Evaluated on the CHROME UI target: the Stream Mode curtain is rendered by
 // Chrome.tsx (data-testid="curtain"), never inside the page webContents.
 const CURTAIN_UP_EXPR = `document.querySelector('[data-testid="curtain"]') !== null`;
+
+// Scenario 27: one fresh RTCPeerConnection per call (the IP handling policy
+// only binds connections created after it is set), NO ICE server (no STUN
+// request ever leaves the machine), a data channel so there is something to
+// gather for. Returns the trickled candidates AND the final local SDP: a
+// policy that exposes the default local address can do it through either.
+const ICE_PROBE_EXPR = `(async () => {
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  const candidates = [];
+  pc.onicecandidate = (e) => {
+    if (e.candidate && e.candidate.candidate) candidates.push(e.candidate.candidate);
+  };
+  pc.createDataChannel('smoke-ice-probe');
+  await pc.setLocalDescription(await pc.createOffer());
+  const complete = await new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') return resolve(true);
+    const timer = setTimeout(() => resolve(false), 4000);
+    pc.onicegatheringstatechange = () => {
+      if (pc.iceGatheringState !== 'complete') return;
+      clearTimeout(timer);
+      resolve(true);
+    };
+  });
+  const sdp = (pc.localDescription && pc.localDescription.sdp) || '';
+  pc.close();
+  return { complete, candidates, sdp };
+})()`;
+
+/**
+ * A literal address no page should learn from a streamer: RFC 1918, loopback,
+ * link-local, CGNAT (100.64/10, Tailscale & co), IPv6 loopback/ULA/link-local.
+ * 0.0.0.0 is not one: it is what the SDP says when no host candidate exists.
+ */
+function isLocalAddress(raw) {
+  const addr = raw.replace(/^\[|\]$/g, '').toLowerCase();
+  const v4 = addr.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return (
+      a === 10 ||
+      a === 127 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 169 && b === 254) ||
+      (a === 100 && b >= 64 && b <= 127)
+    );
+  }
+  return addr.includes(':') && (addr === '::1' || /^f[cd]/.test(addr) || /^fe[89ab]/.test(addr));
+}
+
+/**
+ * What an ICE probe exposed to the page: every candidate (trickled and in the
+ * SDP), the host ones (any form: raw IP or mDNS `<uuid>.local`), and every
+ * local address seen anywhere (candidate or SDP connection line).
+ */
+function iceExposure(probe) {
+  const lines = [
+    ...probe.candidates,
+    ...probe.sdp
+      .split(/\r?\n/)
+      .filter((l) => l.startsWith('a=candidate:'))
+      .map((l) => l.slice(2)),
+  ];
+  // candidate:<foundation> <component> <transport> <priority> <address> <port> typ <type> ...
+  const parsed = lines.map((line) => {
+    const f = line.trim().split(/\s+/);
+    const typ = f.indexOf('typ');
+    return { line, address: f[4] ?? '', type: typ >= 0 ? (f[typ + 1] ?? '') : '' };
+  });
+  const connAddrs = probe.sdp
+    .split(/\r?\n/)
+    .filter((l) => l.startsWith('c=IN '))
+    .map((l) => l.split(/\s+/)[2] ?? '');
+  return {
+    complete: probe.complete,
+    count: parsed.length,
+    host: parsed.filter((c) => c.type === 'host').map((c) => c.line),
+    local: [...parsed.map((c) => c.address), ...connAddrs].filter(isLocalAddress),
+  };
+}
 
 /** True if a frame's text still carries either sensitive token verbatim. */
 const rawInPoisonFrame = (text) =>
@@ -2317,7 +2405,114 @@ async function main() {
   if (contractTab) await ui.evaluate(`window.voksa.tabs.close(${J(contractTab.id)})`);
   pass('EXTENSION CONTRACT');
 
-  // --- 27. NO RENDERER EXCEPTIONS -------------------------------------------------
+  // --- 27. WEBRTC UNDER STREAM -----------------------------------------------------
+  // Stream Mode's WebRTC protection is a per-webContents IP handling policy
+  // (main/stream-mode/webrtcPolicy.ts): while streaming, ICE gathering must
+  // expose no host candidate at all, so no local/private address ever reaches
+  // the page, while the connection itself still works (calls must survive).
+  // Three paths, each a different way for the policy to arrive:
+  //   a. stream OFF control: the same probe DOES see host candidates, or the
+  //      "none under stream" checks below would pass on a probe that gathers
+  //      nothing at all;
+  //   b. a live tab when Stream Mode toggles ON (config-changed re-push);
+  //   c. a popup (window.open) born while Stream Mode is on (creation hook).
+  // Then Stream OFF must give the tab its host candidates back, live.
+  // Polled, not snapshotted: the policy reaches the renderer over its own
+  // channel, not the CDP one, so the first probe after a toggle may predate it.
+  await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  const iceUrl = `${pageUrl}?ice=tab`;
+  const icePopupUrl = `${pageUrl}?ice=popup`;
+  const iceTabId = await ui.evaluate(`window.voksa.tabs.create(${J(iceUrl)})`);
+  const iceTarget = await waitFor(
+    'WebRTC probe tab target',
+    async () => (await listTargets()).find((t) => t.type === 'page' && t.url === iceUrl),
+    STEP_TIMEOUT_MS,
+  );
+  const icePage = await CdpClient.connect(iceTarget.webSocketDebuggerUrl, 'webrtc probe');
+  clients.push(icePage);
+  const probeIce = async (client) => iceExposure(await client.evaluate(ICE_PROBE_EXPR));
+
+  let ice = null;
+  try {
+    await waitFor(
+      'stream OFF: ICE gathering completes with host candidates (control)',
+      async () => {
+        ice = await probeIce(icePage);
+        return ice.complete && ice.host.length > 0;
+      },
+      STEP_TIMEOUT_MS,
+    );
+  } catch (err) {
+    throw new Error(
+      `${err.message}; last probe: ${JSON.stringify(ice)} (with Stream Mode OFF the default policy must ` +
+        'gather host candidates; without them the stream assertions below prove nothing)',
+    );
+  }
+
+  const iceCfg = await ui.evaluate(`window.voksa.stream.update({ enabled: true })`);
+  if (iceCfg?.blockWebRTC !== true || iceCfg?.strictWebRTC !== false) {
+    throw new Error(
+      `default config must protect WebRTC without the strict opt-in, got ${JSON.stringify(iceCfg)}`,
+    );
+  }
+  /** True when a probe exposed nothing local; throws what leaked otherwise. */
+  const assertNoLocalIce = (what, probe) => {
+    if (probe.complete && probe.host.length === 0 && probe.local.length === 0) return true;
+    throw new Error(
+      `${what}: ${probe.host.length} host candidate(s) ${JSON.stringify(probe.host)}, ` +
+        `local address(es) ${JSON.stringify(probe.local)}, gathering complete: ${probe.complete}`,
+    );
+  };
+  const ICE_HINT =
+    'every webContents must carry default_public_interface_only under Stream Mode (webrtcPolicy.ts)';
+  // A leak may be the stale pre-toggle policy for a beat (see above): retried
+  // until the budget runs out, and waitFor reports the last leak seen.
+  await waitFor(
+    'Stream ON: a live tab exposes no host candidate',
+    async () => assertNoLocalIce('live tab', await probeIce(icePage)),
+    STEP_TIMEOUT_MS,
+    ICE_HINT,
+  );
+
+  await icePage.evaluate(`void window.open(${J(icePopupUrl)}, 'smoke-ice', 'popup,width=480,height=360')`, {
+    userGesture: true,
+  });
+  const popupTarget = await waitFor(
+    'WebRTC probe popup target',
+    async () => (await listTargets()).find((t) => t.type === 'page' && t.url === icePopupUrl),
+    STEP_TIMEOUT_MS,
+    'window.open with popup features must yield a managed popup (TabManager setWindowOpenHandler new-window)',
+  );
+  const icePopup = await CdpClient.connect(popupTarget.webSocketDebuggerUrl, 'webrtc popup');
+  clients.push(icePopup);
+  // No toggle happened since the popup was created: only the creation-time
+  // policy can protect it, so a single probe is the honest assertion.
+  try {
+    assertNoLocalIce('popup born under Stream Mode', await probeIce(icePopup));
+  } catch (err) {
+    throw new Error(`${err.message} (${ICE_HINT})`);
+  }
+  await icePopup.evaluate(`window.close()`).catch(() => {});
+  await waitFor(
+    'WebRTC probe popup closed',
+    async () => !(await listTargets()).some((t) => t.type === 'page' && t.url === icePopupUrl),
+    STEP_TIMEOUT_MS,
+  );
+
+  await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  await waitFor(
+    'stream OFF: the tab gathers host candidates again',
+    async () => {
+      ice = await probeIce(icePage);
+      return ice.complete && ice.host.length > 0;
+    },
+    STREAM_TIMEOUT_MS,
+    'the default policy was not restored live on Stream OFF (webrtcPolicy.ts config-changed path)',
+  );
+  await ui.evaluate(`window.voksa.tabs.close(${J(iceTabId)})`);
+  pass('WEBRTC UNDER STREAM');
+
+  // --- 28. NO RENDERER EXCEPTIONS -------------------------------------------------
   if (uiExceptions.length > 0) {
     throw new Error(
       `chrome UI threw ${uiExceptions.length} uncaught exception(s) during the run:\n${uiExceptions.join('\n')}`,

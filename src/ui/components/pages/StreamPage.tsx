@@ -23,6 +23,7 @@ import {
   RotateCcw,
   Server,
   Shield,
+  ShieldAlert,
   Siren,
   Tag,
   Trash2,
@@ -104,10 +105,20 @@ const CONTENT_MASKS: MaskCard[] = [
 const ACCESS_MASKS: MaskCard[] = [
   {
     key: 'blockWebRTC',
-    label: 'Bloquer WebRTC',
-    description: 'Empêche toute divulgation d’IP via WebRTC.',
+    label: 'Masquer l’IP locale (WebRTC)',
+    description:
+      'Les sites ne voient plus vos adresses locales (réseau, VPN) via WebRTC. Les appels et le partage d’écran continuent de fonctionner.',
     icon: Radio,
-    demo: 'RTCPeerConnection → blocked',
+    demo: 'candidat ICE 192.168.1.20 → retiré',
+  },
+  {
+    key: 'strictWebRTC',
+    label: 'WebRTC strict',
+    description:
+      'Coupe l’UDP direct de WebRTC (hors proxy). Les appels et le partage d’écran peuvent échouer. Désactivé par défaut.',
+    icon: ShieldAlert,
+    demo: 'UDP hors proxy → bloqué',
+    accent: 'warn',
   },
   {
     key: 'denyGeolocation',
@@ -170,6 +181,7 @@ export function StreamPage(): React.ReactElement {
     if (config.maskMacAddresses) n++;
     if (config.maskInternalHostnames) n++;
     if (config.blockWebRTC) n++;
+    if (config.strictWebRTC) n++;
     if (config.denyGeolocation) n++;
     if (config.denyCamera) n++;
     if (config.denyMicrophone) n++;

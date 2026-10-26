@@ -8,7 +8,19 @@ export type StreamModeConfig = {
   maskPhones: boolean;
   maskMacAddresses: boolean;
   maskInputValues: boolean;
+  /**
+   * While streaming, WebRTC only gathers on the default route and never
+   * exposes a local/private address (LAN, split-tunnel VPN, secondary NICs).
+   * Calls and screen sharing keep working. See webRtcPolicyFor.
+   */
   blockWebRTC: boolean;
+  /**
+   * Opt-in: while streaming, WebRTC may not use UDP outside a proxy (no STUN,
+   * no direct UDP media). Hides the public address from page scripts too, but
+   * without a proxy calls fall back to TURN over TCP at best, and often fail.
+   * Wins over blockWebRTC when both are set (fail closed).
+   */
+  strictWebRTC: boolean;
   denyGeolocation: boolean;
   denyCamera: boolean;
   denyMicrophone: boolean;
@@ -81,6 +93,7 @@ export const DEFAULT_STREAM_CONFIG: StreamModeConfig = {
   maskMacAddresses: true,
   maskInputValues: true,
   blockWebRTC: true,
+  strictWebRTC: false,
   denyGeolocation: true,
   denyCamera: true,
   denyMicrophone: true,
@@ -91,6 +104,31 @@ export const DEFAULT_STREAM_CONFIG: StreamModeConfig = {
   customMasks: [],
   color: DEFAULT_STREAM_COLOR,
 };
+
+/**
+ * The Chromium WebRTC IP handling policies Stream Mode uses (values of
+ * webContents.setWebRTCIPHandlingPolicy). The policy lives in each
+ * webContents' renderer prefs and applies to every RTCPeerConnection created
+ * AFTER it is set: a call already connected keeps the candidates it gathered.
+ */
+export type WebRtcIpPolicy = 'default' | 'default_public_interface_only' | 'disable_non_proxied_udp';
+
+/**
+ * The policy every webContents must carry for this config:
+ *  - Stream Mode off, or both WebRTC toggles off: Chromium's default
+ *    (all interfaces; host addresses mDNS-obfuscated until a media grant);
+ *  - blockWebRTC: `default_public_interface_only`, the default route only and
+ *    no host candidate at all, so no local/private address ever reaches the
+ *    page while STUN/TURN keep calls (Meet, Discord, Zoom web) working;
+ *  - strictWebRTC: `disable_non_proxied_udp`, no UDP outside a proxy. Wins
+ *    over blockWebRTC: the user explicitly asked for the stricter one.
+ */
+export function webRtcPolicyFor(config: StreamModeConfig): WebRtcIpPolicy {
+  if (!config.enabled) return 'default';
+  if (config.strictWebRTC) return 'disable_non_proxied_udp';
+  if (config.blockWebRTC) return 'default_public_interface_only';
+  return 'default';
+}
 
 export type StreamToggleKey = Exclude<keyof StreamModeConfig, 'enabled'>;
 
@@ -132,8 +170,15 @@ export const STREAM_TOGGLES: Array<{
   },
   {
     key: 'blockWebRTC',
-    label: 'Bloquer WebRTC',
-    description: 'Empêche toute divulgation d’IP via WebRTC.',
+    label: 'Masquer l’IP locale (WebRTC)',
+    description:
+      'Les sites ne voient plus vos adresses locales (réseau, VPN) via WebRTC. Les appels et le partage d’écran continuent de fonctionner.',
+  },
+  {
+    key: 'strictWebRTC',
+    label: 'WebRTC strict',
+    description:
+      'Coupe l’UDP direct de WebRTC (hors proxy). Les appels et le partage d’écran peuvent échouer. Désactivé par défaut.',
   },
   {
     key: 'denyGeolocation',

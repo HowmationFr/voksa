@@ -6,6 +6,7 @@ export type StreamModeConfig = {
   maskIPv6: boolean;
   maskEmails: boolean;
   maskPhones: boolean;
+  maskMacAddresses: boolean;
   maskInputValues: boolean;
   blockWebRTC: boolean;
   denyGeolocation: boolean;
@@ -77,6 +78,7 @@ export const DEFAULT_STREAM_CONFIG: StreamModeConfig = {
   maskIPv6: true,
   maskEmails: true,
   maskPhones: true,
+  maskMacAddresses: true,
   maskInputValues: true,
   blockWebRTC: true,
   denyGeolocation: true,
@@ -116,6 +118,11 @@ export const STREAM_TOGGLES: Array<{
     key: 'maskPhones',
     label: 'Masquer les numéros de téléphone',
     description: 'Les numéros de téléphone au format courant sont masqués.',
+  },
+  {
+    key: 'maskMacAddresses',
+    label: 'Masquer les adresses MAC',
+    description: 'Remplace toute adresse MAC par xx:xx:xx:xx:xx:xx dans le DOM.',
   },
   {
     key: 'maskInputValues',

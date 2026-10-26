@@ -122,6 +122,7 @@ function isMaskingActive(config: StreamModeConfig): boolean {
     maskIPv6: config.maskIPv6,
     maskEmails: config.maskEmails,
     maskPhones: config.maskPhones,
+    maskMacAddresses: config.maskMacAddresses,
     maskInternalHostnames: config.maskInternalHostnames,
   };
   return config.enabled && hasAnyMask(flags, config.customMasks);

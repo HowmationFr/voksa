@@ -14,6 +14,7 @@ const ALL: MaskFlags = {
   maskIPv6: true,
   maskEmails: true,
   maskPhones: true,
+  maskMacAddresses: true,
   maskInternalHostnames: false,
 };
 
@@ -78,6 +79,33 @@ describe('phone masking (tightened)', () => {
   });
 });
 
+describe('MAC address masking', () => {
+  it('masks the colon, hyphen and Cisco dotted spellings, any case', () => {
+    expect(mask('ether a4:83:e7:1f:2c:9b up')).toBe(`ether ${MASK.MAC} up`);
+    expect(mask('Physical Address: A4-83-E7-1F-2C-9B')).toBe(`Physical Address: ${MASK.MAC}`);
+    expect(mask('mac a483.e71f.2c9b')).toBe(`mac ${MASK.MAC}`);
+    expect(mask('HWaddr=00:1A:2b:3C:4d:5E;')).toBe(`HWaddr=${MASK.MAC};`);
+  });
+  it('masks an all-digit MAC as a MAC, not as a phone number', () => {
+    expect(mask('00-11-22-33-44-55')).toBe(MASK.MAC);
+  });
+  it('requires one separator and exactly six 2-digit groups', () => {
+    expect(mask('aa:bb-cc:dd-ee:ff')).toBe('aa:bb-cc:dd-ee:ff');
+    expect(mask('aa:bb:cc:dd:ee')).toBe('aa:bb:cc:dd:ee');
+    expect(mask('12:34:56')).toBe('12:34:56');
+    expect(mask('aab:bb:cc:dd:ee:ff')).toBe('aab:bb:cc:dd:ee:ff');
+  });
+  it('leaves a bare 12-hex-digit run alone (hash / ID, not provably a MAC)', () => {
+    expect(mask('commit a483e71f2c9b')).toBe('commit a483e71f2c9b');
+  });
+  it('lets IPv6 claim an address first, so no prefix survives', () => {
+    expect(mask('2a01:e0a:12:34:56:78:9a:bc')).toBe(MASK.IPV6);
+  });
+  it('is off when its flag is off', () => {
+    expect(mask('a4:83:e7:1f:2c:9b', { maskMacAddresses: false })).toBe('a4:83:e7:1f:2c:9b');
+  });
+});
+
 describe('custom masks', () => {
   it('bullets out custom substrings (>=2 chars, case-insensitive)', () => {
     const out = mask('Project Falcon is secret', {}, ['Falcon']);
@@ -111,6 +139,7 @@ describe('hasAnyMask', () => {
           maskIPv6: false,
           maskEmails: false,
           maskPhones: false,
+          maskMacAddresses: false,
           maskInternalHostnames: false,
         },
         [],
@@ -125,6 +154,7 @@ describe('hasAnyMask', () => {
           maskIPv6: false,
           maskEmails: false,
           maskPhones: false,
+          maskMacAddresses: false,
           maskInternalHostnames: false,
         },
         ['secret'],

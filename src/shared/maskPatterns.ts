@@ -17,6 +17,7 @@ export const MASK = {
   IPV6: 'xxxx:xxxx:xxxx:xxxx',
   EMAIL: 'xxx@xxx.xxx',
   PHONE: '·· ·· ·· ·· ··',
+  MAC: 'xx:xx:xx:xx:xx:xx',
   HOSTNAME: 'xxxxxx',
 } as const;
 
@@ -51,6 +52,17 @@ export const IPV6_RE = new RegExp(
 );
 
 export const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+
+/**
+ * MAC address (EUI-48) in its three common spellings: `aa:bb:cc:dd:ee:ff`
+ * (Linux, macOS, router UIs), `AA-BB-CC-DD-EE-FF` (Windows) and the Cisco
+ * dotted `aabb.ccdd.eeff`. The backreference forces ONE separator throughout
+ * (`aa:bb-cc:dd-ee:ff` is not a MAC). A bare run of 12 hex digits is
+ * deliberately NOT matched: it is indistinguishable from a hash or an ID. No
+ * private/public filter as for IPs: every MAC identifies a device.
+ */
+export const MAC_RE =
+  /\b(?:[0-9A-Fa-f]{2}([:-])(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4})\b/g;
 
 /**
  * Phone-number candidate. Deliberately conservative to avoid the old
@@ -121,6 +133,7 @@ export type MaskFlags = {
   maskIPv6: boolean;
   maskEmails: boolean;
   maskPhones: boolean;
+  maskMacAddresses: boolean;
   maskInternalHostnames: boolean;
 };
 
@@ -151,6 +164,12 @@ export function maskText(
   if (flags.maskEmails) {
     out = out.replace(EMAIL_RE, MASK.EMAIL);
   }
+  // After IPv6 (an 8-group IPv6 with 2-digit groups holds a MAC-shaped run;
+  // the address must be masked whole, not left with its prefix showing) and
+  // before phones (an all-digit `00-11-22-33-44-55` is also phone-shaped).
+  if (flags.maskMacAddresses) {
+    out = out.replace(MAC_RE, MASK.MAC);
+  }
   if (flags.maskPhones) {
     out = out.replace(PHONE_RE, (m) => (isLikelyPhone(m) ? MASK.PHONE : m));
   }
@@ -178,6 +197,7 @@ export function hasAnyMask(flags: MaskFlags, customMasks: readonly string[] = []
     flags.maskIPv6 ||
     flags.maskEmails ||
     flags.maskPhones ||
+    flags.maskMacAddresses ||
     flags.maskInternalHostnames ||
     customMasks.some((s) => s.trim().length >= 2)
   );

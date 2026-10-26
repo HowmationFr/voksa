@@ -13,15 +13,23 @@ permissions:
   contents: write
 
 jobs:
+  # No npm ci / typecheck / tests here: the tagged commit must be on main, and
+  # main only receives pull requests that passed the full CI on that exact
+  # tree. Re-testing it delayed every artifact build by ~2 minutes.
   guard:
-    name: Guard (tag = version, tests)
+    name: Guard (tag = version, commit on main)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
         with:
-          node-version: 22
-          cache: npm
+          # Full history and branches: the ancestry check needs origin/main.
+          fetch-depth: 0
+      - name: Tagged commit must be on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main. Merge the release PR first, then tag the merge commit."
+            exit 1
+          fi
       - name: Tag must match package.json version
         run: |
           TAG="${GITHUB_REF_NAME}"
@@ -33,10 +41,6 @@ jobs:
       - name: Repository field must be set
         run: |
           node -e "const r = String(require('./package.json').repository ?? ''); if (!r || r.includes('VOTRE-COMPTE-GITHUB')) { console.error('package.json repository still contains the placeholder'); process.exit(1); }"
-      - name: Install dependencies
-        run: npm ci
-      - name: Typecheck + tests
-        run: npm run typecheck && npm test
 
   draft:
     name: Create the draft release

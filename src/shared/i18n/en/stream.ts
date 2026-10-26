@@ -16,6 +16,10 @@ export const enStream: Record<string, string> = {
   'Numéros de téléphone': 'Phone numbers',
   'Formats internationaux et nationaux courants.': 'Common international and national formats.',
   '+33 6 12 34 56 78  →  xxx xxx xxx xxx': '+33 6 12 34 56 78  →  xxx xxx xxx xxx',
+  'Adresses MAC': 'MAC addresses',
+  'Formats aa:bb:cc:dd:ee:ff, AA-BB-CC-DD-EE-FF et aabb.ccdd.eeff.':
+    'Formats aa:bb:cc:dd:ee:ff, AA-BB-CC-DD-EE-FF and aabb.ccdd.eeff.',
+  'a4:83:e7:1f:2c:9b → xx:xx:xx:xx:xx:xx': 'a4:83:e7:1f:2c:9b → xx:xx:xx:xx:xx:xx',
   'Hostnames internes': 'Internal hostnames',
   '*.local, *.lan et le nom de machine. Désactivé par défaut.':
     '*.local, *.lan and the machine name. Disabled by default.',

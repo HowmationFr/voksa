@@ -7,6 +7,7 @@ const FLAGS: MaskFlags = {
   maskIPv6: true,
   maskEmails: true,
   maskPhones: true,
+  maskMacAddresses: true,
   maskInternalHostnames: false,
 };
 

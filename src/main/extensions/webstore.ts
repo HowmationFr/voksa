@@ -1,5 +1,13 @@
-import { BrowserWindow, dialog } from 'electron';
-import type { BaseWindow, ContextMenuParams, MenuItem, Session, WebContents } from 'electron';
+import { BrowserWindow, dialog, webContents } from 'electron';
+import type {
+  BaseWindow,
+  ContextMenuParams,
+  MenuItem,
+  NativeImage,
+  Session,
+  WebContents,
+  WebFrameMain,
+} from 'electron';
 import {
   focusedWindow,
   openNewWindow,
@@ -9,6 +17,12 @@ import {
 import { t } from '../i18n';
 import { extensionPopupPreloadPath, popupWebPreferences } from '../tabs/pageSurface';
 import { ExtensionPopupGate } from '../stream-mode/extensionPopupGate';
+import {
+  installDisplayName,
+  installPermissionLines,
+  isValidExtensionId,
+  isWebStoreOrigin,
+} from './webstoreGuards';
 
 /**
  * Chrome Web Store + Chrome extension runtime integration.
@@ -101,6 +115,77 @@ function adoptActionPopup(popup: ActionPopup): void {
   const owner = (popup.parent ? windowById(popup.parent.id) : null) ?? focusedWindow();
   if (owner) owner.tabs.adoptExtensionPopup(win);
   else new ExtensionPopupGate(win);
+}
+
+// electron-chrome-web-store's beforeInstall details (ExtensionInstallDetails),
+// manifest left loose for the same @types/chrome reason.
+type WebStoreInstallDetails = {
+  id: string;
+  localizedName: string;
+  manifest: unknown;
+  icon: NativeImage;
+  browserWindow?: BrowserWindow;
+  frame: WebFrameMain;
+};
+type WebStoreInstallDecision = { action: 'allow' | 'deny' };
+
+/**
+ * beforeInstall hook of electron-chrome-web-store. Without one the library
+ * installs silently, on the page's word alone. Two layers:
+ *  1. only a frame whose own origin AND top-level origin are exactly the
+ *     store may ask at all. The patched library already gates the frame
+ *     origin; this check survives a bump that drops the patch, and also
+ *     refuses a store page framed by another site (clickjacking).
+ *  2. the user confirms every install in a native dialog naming the
+ *     extension and what it can access, like Chrome's "Add extension?".
+ *     Cancel is the default button: a stray Enter must not install.
+ */
+async function confirmWebStoreInstall(
+  details: WebStoreInstallDetails,
+): Promise<WebStoreInstallDecision> {
+  let origin: string | undefined;
+  let topOrigin: string | undefined;
+  let host: WebContents | undefined;
+  try {
+    origin = details.frame.origin;
+    topOrigin = details.frame.top?.origin;
+    host = webContents.fromFrame(details.frame);
+  } catch {
+    // frame destroyed mid-request: nobody left to install for
+  }
+  if (
+    !isWebStoreOrigin(origin) ||
+    !isWebStoreOrigin(topOrigin) ||
+    !isValidExtensionId(details.id)
+  ) {
+    console.warn(`[extensions] install request refused (origin ${String(origin)})`);
+    return { action: 'deny' };
+  }
+
+  const name = installDisplayName(details.localizedName, details.manifest, details.id);
+  const { lines, more } = installPermissionLines(details.manifest);
+  const detail =
+    lines.length > 0
+      ? [
+          t('Autorisations demandées :'),
+          ...lines.map((line) => `• ${line}`),
+          ...(more > 0 ? [t('… et {n} de plus', { n: more })] : []),
+        ].join('\n')
+      : t('Aucune autorisation particulière demandée.');
+  const parent = (host ? windowFromPageContents(host) : null) ?? focusedWindow();
+  const opts = {
+    type: 'question' as const,
+    buttons: [t('Ajouter l’extension'), t('Annuler')],
+    defaultId: 1,
+    cancelId: 1,
+    message: t('Ajouter « {name} » ?', { name }),
+    detail,
+    ...(details.icon && !details.icon.isEmpty() ? { icon: details.icon } : {}),
+  };
+  const { response } = parent
+    ? await dialog.showMessageBox(parent.window, opts)
+    : await dialog.showMessageBox(opts);
+  return { action: response === 0 ? 'allow' : 'deny' };
 }
 
 export async function setupChromeWebStore(session: Session): Promise<void> {
@@ -262,12 +347,22 @@ export async function setupChromeWebStore(session: Session): Promise<void> {
   }
 
   // 2. Chrome Web Store installer (scans the webstore page, intercepts
-  // install buttons, downloads CRX, calls session.loadExtension).
+  // install buttons, downloads CRX, calls session.loadExtension). The
+  // library is PATCHED (patches/electron-chrome-web-store+0.13.0.patch:
+  // exact store origin, extension-id validation) and every install goes
+  // through confirmWebStoreInstall.
   try {
     const wsMod = await import('electron-chrome-web-store');
     const installer = wsMod.installChromeWebStore ?? (wsMod as { setup?: unknown }).setup;
     if (typeof installer === 'function') {
-      await (installer as (opts: { session: Session }) => Promise<void>)({ session });
+      type InstallerOptions = {
+        session: Session;
+        beforeInstall: (details: WebStoreInstallDetails) => Promise<WebStoreInstallDecision>;
+      };
+      await (installer as (opts: InstallerOptions) => Promise<void>)({
+        session,
+        beforeInstall: confirmWebStoreInstall,
+      });
       console.log('[extensions] Chrome Web Store ready on session.');
     } else {
       console.warn('[extensions] installChromeWebStore not found in module.');

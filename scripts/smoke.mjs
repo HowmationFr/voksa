@@ -1436,22 +1436,42 @@ async function main() {
   // absence of a leak between two samples, but it is the same detector the
   // preload-less frame scenario uses, and it caught real regressions there.
   await ui.evaluate(`window.voksa.tabs.activate(${J(victimId)})`);
-  const streamTarget = await waitFor(
+  let streamTarget = await waitFor(
     'revived-under-stream page target',
     async () => (await listTargets()).find((t) => t.type === 'page' && t.url === page2Url),
     STEP_TIMEOUT_MS,
   );
-  const streamRevived = await CdpClient.connect(streamTarget.webSocketDebuggerUrl, 'revived under stream');
+  let streamRevived = await CdpClient.connect(streamTarget.webSocketDebuggerUrl, 'revived under stream');
   clients.push(streamRevived);
 
   let maskedAndVisible = false;
+  let lastSampleError = null;
   const deadline = Date.now() + STEP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     let s;
     try {
       s = await streamRevived.evaluate(PAGE_STATE_EXPR);
-    } catch {
-      break; // target went away (a re-navigation); the checks below still apply
+    } catch (err) {
+      // The target is listed under page2Url as soon as the history is restored,
+      // i.e. BEFORE the replayed document commits: an early sample can land in
+      // the context that commit destroys, or the target can be swapped (a
+      // macOS CI run used to break out of this loop on such a sample and fail
+      // a healthy tab). Neither is a verdict: re-resolve the target and sample
+      // again; a tab that never comes back still fails below, on the deadline.
+      lastSampleError = err.message;
+      await sleep(100);
+      try {
+        const current = (await listTargets()).find((t) => t.type === 'page' && t.url === page2Url);
+        if (current && (streamRevived.closed || current.id !== streamTarget.id)) {
+          streamRevived.close();
+          streamTarget = current;
+          streamRevived = await CdpClient.connect(current.webSocketDebuggerUrl, 'revived under stream');
+          clients.push(streamRevived);
+        }
+      } catch (reconnectErr) {
+        lastSampleError = reconnectErr.message;
+      }
+      continue;
     }
     if (s.body.includes(PAGE2_EMAIL) && s.opacity === '1') {
       throw new Error(
@@ -1468,7 +1488,8 @@ async function main() {
   if (!maskedAndVisible) {
     throw new Error(
       'the tab revived under Stream Mode never came back masked AND visible: it is either still shrouded ' +
-        '(a permanently blank tab) or never repainted (see Tab.restoreNavigation)',
+        '(a permanently blank tab) or never repainted (see Tab.restoreNavigation)' +
+        (lastSampleError ? `; last sampling error: ${lastSampleError}` : ''),
     );
   }
   await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);

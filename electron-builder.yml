@@ -3,6 +3,11 @@ productName: Voksa
 copyright: Copyright (c) 2026 Voksa
 asar: true
 compression: normal
+# Nothing to rebuild per target: better-sqlite3 (the only native dependency)
+# ships N-API prebuilds for every platform/arch we package, and N-API is
+# stable across Electron releases. A new native dependency without prebuilds
+# would need this back on (and a C++ toolchain on every runner).
+npmRebuild: false
 
 # Electron fuses (baked into the packaged binary). runAsNode MUST stay off:
 # with it on, a machine-wide ELECTRON_RUN_AS_NODE=1 env var (present on some
@@ -35,12 +40,21 @@ files:
   - node_modules/electron-chrome-extensions/**/*
   - "!node_modules/**/test/**"
   - "!node_modules/**/tests/**"
+  # better-sqlite3's SQLite amalgamation and C++ sources (~10MB) are only
+  # compile inputs: at runtime lib/binding.js loads a prebuilt .node. Without
+  # this they ship twice over, since smartUnpack moves the whole module (any
+  # dir holding a .node) out of the asar.
+  - "!node_modules/better-sqlite3/{deps,src}/**"
+  - "!node_modules/better-sqlite3/binding.gyp"
   - "!node_modules/**/*.md"
   - "!node_modules/**/*.map"
 
 asarUnpack:
   # Only the native binding + its loader need to live outside the asar, not
-  # the 10MB of SQLite source tarballs under deps/ and src/.
+  # the 10MB of SQLite source tarballs under deps/ and src/. Since 13.x the
+  # binding is a prebuilt N-API addon under prebuilds/ (lib/binding.js loads
+  # it); build/Release only exists when no prebuild matched and it compiled.
+  - "**/node_modules/better-sqlite3/prebuilds/*.node"
   - "**/node_modules/better-sqlite3/build/Release/*.node"
   - "**/node_modules/better-sqlite3/lib/**/*"
   - "**/node_modules/better-sqlite3/package.json"
@@ -59,6 +73,14 @@ win:
       arch:
         - x64
   icon: resources/icon.png
+  # better-sqlite3 ships the prebuilt binaries of EVERY platform (~2MB each):
+  # keep only the target's (lib/binding.js picks <platform>-<arch> at
+  # runtime). package.json is the include that keeps this list from being
+  # ignore-only: electron-builder would then prepend **/* and drop the
+  # top-level whitelist, shipping the whole repository.
+  files:
+    - package.json
+    - "!node_modules/better-sqlite3/prebuilds/!(win32-${arch}).node"
 
 nsis:
   oneClick: false
@@ -90,6 +112,11 @@ mac:
   artifactName: ${productName}-${version}-mac-${arch}.${ext}
   category: public.app-category.productivity
   icon: resources/icon.png
+  # See win.files (per packed arch: x64 and arm64 are separate apps here; a
+  # `universal` target would need both darwin prebuilds in each).
+  files:
+    - package.json
+    - "!node_modules/better-sqlite3/prebuilds/!(darwin-${arch}).node"
   # Signing + notarization (CI provides CSC_LINK / CSC_KEY_PASSWORD and
   # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID; without those
   # env vars electron-builder skips both steps, so local dev builds still
@@ -118,6 +145,10 @@ linux:
     - deb
   category: Network
   icon: resources/icon.png
+  # See win.files (AppImage and deb are glibc: the musl prebuild never loads).
+  files:
+    - package.json
+    - "!node_modules/better-sqlite3/prebuilds/!(linux-${arch}).node"
   maintainer: Voksa <contact@voksa.app>
   # x-scheme-handler/http(s) is what makes desktop environments list Voksa as
   # a BROWSER (xdg-settings / GNOME default-apps read the .desktop MimeType).

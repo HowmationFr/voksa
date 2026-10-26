@@ -30,7 +30,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Install dependencies (postinstall runs patch-package + electron-rebuild)
+      - name: Install dependencies (postinstall applies patches/ with patch-package)
         run: npm ci
       - name: Typecheck
         run: npm run typecheck

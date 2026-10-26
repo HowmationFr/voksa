@@ -269,13 +269,29 @@ describe('IPC contract (static analysis of src/main + src/preload)', () => {
     // may legitimately use colon-y event names, so they are not matched.
     const rawLiteral =
       /\b(?:ipcMain|ipcRenderer|wc|sender|contents|[\w$]*[wW]ebContents|[\w$]*[fF]rame)\.(?:handle|on|once|invoke|send|sendSync|sendToFrame)\s*\(\s*(['"`])([a-z][\w-]*:[\w-]+(?::[\w-]+)*)\1/g;
+    // voksaApi's bare invoke()/on() helpers wrap ipcRenderer (no receiver).
+    const rawHelperLiteral = /(?<![\w$.])(?:invoke|on)\s*(?:<[^>]*>)?\(\s*(['"`])([a-z][\w-]*:[\w-]+(?::[\w-]+)*)\1/g;
     const problems: string[] = [];
     for (const file of [...mainFiles, ...preloadFiles]) {
       for (const m of file.text.matchAll(rawLiteral)) {
         problems.push(`${file.path} uses raw channel literal '${m[2]}'; reference it as IPC.X instead. ${GOLDEN_RULE}`);
       }
     }
+    for (const file of preloadFiles) {
+      for (const m of file.text.matchAll(rawHelperLiteral)) {
+        problems.push(`${file.path} uses raw channel literal '${m[2]}'; reference it as IPC.X instead. ${GOLDEN_RULE}`);
+      }
+    }
     expect(problems).toEqual([]);
+  });
+
+  it('voksaApi invokes only through its rejection-only invoke() helper', () => {
+    // Electron 45's native ipcRenderer.invoke throws synchronously on an
+    // unserializable argument or a released context; the helper turns that
+    // back into a rejection, which every bridge caller's .catch() expects.
+    const api = preloadFiles.find((f) => /voksaApi\.ts$/.test(f.path));
+    expect(api, 'src/preload/voksaApi.ts not scanned').toBeTruthy();
+    expect(api!.text.match(/\bipcRenderer\.invoke\s*\(/g) ?? []).toHaveLength(1);
   });
 
   it('every ipcRenderer.invoke() channel is registered via ipcMain.handle()', () => {

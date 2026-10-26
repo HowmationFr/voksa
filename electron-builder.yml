@@ -46,6 +46,12 @@ files:
   # dir holding a .node) out of the asar.
   - "!node_modules/better-sqlite3/{deps,src}/**"
   - "!node_modules/better-sqlite3/binding.gyp"
+  # npm's implicit node-gyp step (any package with a binding.gyp) leaves its
+  # project files and object-tree recipes here even when it compiles nothing,
+  # with build-machine paths inside; only a compiled build/Release/*.node may
+  # ship.
+  - "!node_modules/better-sqlite3/build/*.*"
+  - "!node_modules/better-sqlite3/build/Release/obj{,/**/*}"
   - "!node_modules/**/*.md"
   - "!node_modules/**/*.map"
 
@@ -75,9 +81,11 @@ win:
   icon: resources/icon.png
   # better-sqlite3 ships the prebuilt binaries of EVERY platform (~2MB each):
   # keep only the target's (lib/binding.js picks <platform>-<arch> at
-  # runtime). package.json is the include that keeps this list from being
-  # ignore-only: electron-builder would then prepend **/* and drop the
-  # top-level whitelist, shipping the whole repository.
+  # runtime). The package.json include is load-bearing: a platform `files`
+  # list made only of exclusions makes electron-builder start the app's file
+  # set from **/* instead of the top-level whitelist, shipping the whole
+  # repository (see build/builder-debug.yml). scripts/check-packaged.mjs
+  # guards both in CI.
   files:
     - package.json
     - "!node_modules/better-sqlite3/prebuilds/!(win32-${arch}).node"

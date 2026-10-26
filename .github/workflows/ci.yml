@@ -102,3 +102,9 @@ jobs:
       - name: Package Linux (no publish)
         if: runner.os == 'Linux' && steps.scope.outputs.version_only != 'true'
         run: npx electron-builder --linux --publish never
+      # The smoke boots the dev tree, never the packaged app: check what each
+      # package actually ships (only the app in app.asar, exactly the
+      # target's better-sqlite3 prebuild per arch).
+      - name: Check the packaged app contents
+        if: steps.scope.outputs.version_only != 'true'
+        run: node scripts/check-packaged.mjs

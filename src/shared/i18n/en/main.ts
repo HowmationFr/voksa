@@ -46,6 +46,14 @@ export const enMain: Record<string, string> = {
   'Refuser': 'Deny',
   '« {name} » demande des autorisations supplémentaires': '"{name}" requests additional permissions',
 
+  // Extension install confirmation (extensions/webstore.ts); 'Annuler' is
+  // shared with the other dialogs.
+  'Ajouter « {name} » ?': 'Add "{name}"?',
+  'Ajouter l’extension': 'Add extension',
+  'Autorisations demandées :': 'Requested permissions:',
+  '… et {n} de plus': '… and {n} more',
+  'Aucune autorisation particulière demandée.': 'No specific permissions requested.',
+
   // Update notification (ipc/handlers.ts)
   'Voksa {version} est prête': 'Voksa {version} is ready',
   'Une mise à jour de Voksa est prête': 'A Voksa update is ready',

@@ -71,6 +71,7 @@ import {
   reorderExtensions,
   uninstallExtensionById,
 } from '../extensions/manager';
+import { isExtensionActionPopup } from '../extensions/webstore';
 
 /**
  * All ipcMain registrations live here and are performed ONCE at boot
@@ -637,6 +638,12 @@ export function registerIpcHandlers(): void {
       event.senderFrame,
       Number(payload?.seq ?? 0),
     );
+  });
+  // The extension-popup session preload asks, at document-start, whether its
+  // webContents is an extension action popup: the one surface that has no page
+  // preload of its own and must run it from there (src/preload/extensionPopup.ts).
+  ipcMain.on(IPC.STREAM_EXT_POPUP_PRELOAD_SYNC, (event) => {
+    event.returnValue = isExtensionActionPopup(event.sender);
   });
 
   // The chrome UI confirmed the curtain backdrop is painted (decode-acked).

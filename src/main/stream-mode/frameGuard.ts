@@ -116,7 +116,7 @@ function pruneTo<K>(
   }
 }
 
-function isMaskingActive(config: StreamModeConfig): boolean {
+export function isMaskingActive(config: StreamModeConfig): boolean {
   const flags: MaskFlags = {
     maskIPv4: config.maskIPv4,
     maskIPv6: config.maskIPv6,

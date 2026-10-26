@@ -47,6 +47,18 @@ const targets = [
     external: ['electron'],
   },
   {
+    // SESSION preload: hands page.js (bundled in, lazily required) to the
+    // extension action popups electron-chrome-extensions creates without a
+    // preload. Runs in every frame of the session and steps aside everywhere
+    // else; see src/preload/extensionPopup.ts.
+    label: 'preload-extension-popup',
+    entry: path.join(root, 'src/preload/extensionPopup.ts'),
+    outfile: path.join(root, 'dist-electron/preload/extensionPopup.js'),
+    platform: 'node',
+    format: 'cjs',
+    external: ['electron'],
+  },
+  {
     // Stream Mode fallback masker: NOT a preload. It is read as text by the
     // main process (frameGuard.ts) and injected with executeJavaScript into the
     // MAIN world of frames Electron refused to give a preload to

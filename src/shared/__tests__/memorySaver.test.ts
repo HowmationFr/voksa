@@ -27,6 +27,7 @@ function tab(id: string, idleMin: number, over: Partial<TabSnapshot> = {}): TabS
     isDiscarded: false,
     isLoading: false,
     hasCurtain: false,
+    hasOpenPopup: false,
     host: 'example.com',
     ...over,
   };
@@ -123,6 +124,10 @@ describe('isProtected: the tabs that may never be freed', () => {
     expect(isProtected(tab('a', 999, { isPinned: true }), [])).toBe(true);
   });
 
+  it('protects the opener of a popup that is still open: freeing it would close a sign-in popup mid-flow', () => {
+    expect(isProtected(tab('a', 999, { hasOpenPopup: true }), [])).toBe(true);
+  });
+
   it('protects an excepted host', () => {
     expect(isProtected(tab('a', 999, { host: 'mail.example.com' }), ['example.com'])).toBe(true);
   });
@@ -147,6 +152,7 @@ describe('selectTabsToDiscard: safety exclusions win at every level', () => {
           tab('internal', 999, { isInternal: true }),
           tab('loading', 999, { isLoading: true }),
           tab('curtained', 999, { hasCurtain: true }),
+          tab('opener', 999, { hasOpenPopup: true }),
           tab('gone', 999, { isDiscarded: true }),
           tab('kept', 999, { host: 'keepme.com' }),
         ],

@@ -14,6 +14,7 @@ import {
   Mail,
   MapPin,
   Mic,
+  Network,
   Palette,
   Phone,
   Pipette,
@@ -82,6 +83,13 @@ const CONTENT_MASKS: MaskCard[] = [
     description: 'Formats internationaux et nationaux courants.',
     icon: Phone,
     demo: '+33 6 12 34 56 78  →  xxx xxx xxx xxx',
+  },
+  {
+    key: 'maskMacAddresses',
+    label: 'Adresses MAC',
+    description: 'Formats aa:bb:cc:dd:ee:ff, AA-BB-CC-DD-EE-FF et aabb.ccdd.eeff.',
+    icon: Network,
+    demo: 'a4:83:e7:1f:2c:9b → xx:xx:xx:xx:xx:xx',
   },
   {
     key: 'maskInternalHostnames',
@@ -159,6 +167,7 @@ export function StreamPage(): React.ReactElement {
     if (config.maskIPv6) n++;
     if (config.maskEmails) n++;
     if (config.maskPhones) n++;
+    if (config.maskMacAddresses) n++;
     if (config.maskInternalHostnames) n++;
     if (config.blockWebRTC) n++;
     if (config.denyGeolocation) n++;

@@ -397,7 +397,7 @@ export function SettingsPage(): React.ReactElement {
           ),
         },
       ],
-      cardKeywords: `${t('Mode Stream')} stream masquage ip email permissions`,
+      cardKeywords: `${t('Mode Stream')} stream masquage ip email mac permissions`,
       card: (
         <BigCard
           icon={Shield}

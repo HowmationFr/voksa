@@ -99,6 +99,7 @@ function createHandle(): FallbackHandle {
       maskIPv6: !!c?.maskIPv6,
       maskEmails: !!c?.maskEmails,
       maskPhones: !!c?.maskPhones,
+      maskMacAddresses: !!c?.maskMacAddresses,
       maskInternalHostnames: !!c?.maskInternalHostnames,
     };
   }

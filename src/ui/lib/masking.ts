@@ -27,6 +27,7 @@ export function useMaskedText(text: string | null | undefined): string {
     maskIPv6: config.maskIPv6,
     maskEmails: config.maskEmails,
     maskPhones: config.maskPhones,
+    maskMacAddresses: config.maskMacAddresses,
     maskInternalHostnames: config.maskInternalHostnames,
   };
   return maskText(text, flags, hostname, config.customMasks);

@@ -588,6 +588,7 @@ export function registerIpcHandlers(): void {
       maskIPv6: cfg.maskIPv6,
       maskEmails: cfg.maskEmails,
       maskPhones: cfg.maskPhones,
+      maskMacAddresses: cfg.maskMacAddresses,
       maskInternalHostnames: cfg.maskInternalHostnames,
     };
     const tabs = win.tabs.getAll().map((t) => ({

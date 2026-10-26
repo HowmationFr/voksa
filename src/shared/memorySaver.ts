@@ -57,6 +57,12 @@ export type TabSnapshot = {
    * it once the curtain dropped.
    */
   hasCurtain: boolean;
+  /**
+   * The tab opened a popup that is still open (a sign-in window, at any depth
+   * of a popup-from-popup chain). Electron closes a child window with its
+   * opener, so freeing the tab would kill the flow in the middle.
+   */
+  hasOpenPopup: boolean;
   /** Hostname, matched against the exception list. Empty when unknown. */
   host: string;
 };
@@ -165,6 +171,7 @@ export function isProtected(tab: TabSnapshot, exceptions: string[]): boolean {
     tab.isDiscarded ||
     tab.isLoading ||
     tab.hasCurtain ||
+    tab.hasOpenPopup ||
     isExceptedHost(tab.host, exceptions)
   );
 }

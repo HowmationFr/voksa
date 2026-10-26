@@ -163,10 +163,15 @@ export function buildVoksaApi() {
         on<StreamModeConfig>(IPC.STREAM_CONFIG_CHANGED, handler),
     },
     capture: {
-      /** Main pushes the screen-share picker (our own, not Chromium's). */
+      /**
+       * Main pushes the screen-share picker (our own, not Chromium's). The
+       * pick IS the capture consent: `origin` names the requesting site ('' when
+       * the chrome UI itself asked).
+       */
       onPickerShow: (
         handler: (payload: {
           pickId: string;
+          origin: string;
           sources: Array<{
             id: string;
             name: string;
@@ -178,6 +183,7 @@ export function buildVoksaApi() {
       ): Unsubscribe =>
         on<{
           pickId: string;
+          origin: string;
           sources: Array<{
             id: string;
             name: string;
@@ -190,8 +196,8 @@ export function buildVoksaApi() {
       pick: (pickId: string, sourceId: string | null) =>
         ipcRenderer.send(IPC.CAPTURE_PICKER_PICK, { pickId, sourceId }),
       /**
-       * Debug/test only: drive the handshake without Chromium's getDisplayMedia
-       * (which does not route to our handler under CDP). Resolves with the
+       * Debug/test only: drive the chrome-UI picker path of the handshake (the
+       * web path is driven for real through getDisplayMedia). Resolves with the
        * delivered source id, or null. No-op (null) in production builds.
        */
       simulate: (): Promise<string | null> => ipcRenderer.invoke(IPC.CAPTURE_SIMULATE),

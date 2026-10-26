@@ -53,3 +53,57 @@ export function windowHandleFromSourceId(id: string): string | null {
   const n = raw.startsWith('0x') ? Number.parseInt(raw, 16) : Number.parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? String(n) : null;
 }
+
+/**
+ * A user pick bound to ONE requesting webContents. Since Electron 45 every
+ * screen-capture request reaches setPermissionRequestHandler first, as
+ * 'display-capture': the permission-time gate issues the ticket, and the
+ * display-media handler (getDisplayMedia only) consumes it and delivers
+ * exactly this source.
+ */
+export type CaptureTicket = {
+  requesterId: number;
+  /**
+   * The request's securityOrigin, raw. The permission details and the
+   * display-media request carry the same string (MediaStreamRequest's origin,
+   * 'file:///' included), so equality needs no URL parsing.
+   */
+  securityOrigin: string;
+  sourceId: string;
+  name: string;
+  consumed: boolean;
+};
+
+/**
+ * Whether a display-media request from `requesterId` / `securityOrigin` may
+ * take this ticket: same webContents, same origin, not taken yet. An empty
+ * origin never matches (fail closed).
+ */
+export function ticketMatches(
+  ticket: CaptureTicket | undefined,
+  requesterId: number | null,
+  securityOrigin: string | null | undefined,
+): ticket is CaptureTicket {
+  if (!ticket || ticket.consumed || requesterId === null) return false;
+  if (ticket.requesterId !== requesterId) return false;
+  return !!securityOrigin && securityOrigin === ticket.securityOrigin;
+}
+
+/**
+ * Grant a gated display-capture permission and report which Chromium path
+ * took it. For getDisplayMedia, Electron 45 runs the display-media handler
+ * SYNCHRONOUSLY inside the permission callback (OnPermissionResponse ->
+ * MediaAccessAllowed -> ChooseDisplayMediaDevice -> JS handler; observed on
+ * Windows, asserted cross-platform by the smoke). The legacy
+ * getUserMedia({chromeMediaSource}) path never calls it: HandleUserMediaRequest
+ * builds the device straight from the page's own source id, the whole desktop
+ * when it names none. So "the handler did not run during grant(true)" means
+ * the page is now capturing a source IT chose, not the user's pick.
+ */
+export function grantAndClassify(
+  grant: (allowed: boolean) => void,
+  displayHandlerRan: () => boolean,
+): 'display-media' | 'legacy-getusermedia' {
+  grant(true);
+  return displayHandlerRan() ? 'display-media' : 'legacy-getusermedia';
+}

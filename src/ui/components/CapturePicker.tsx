@@ -12,14 +12,25 @@ type PickerSource = {
   containsVoksa: boolean;
 };
 
-type PickerRequest = { pickId: string; sources: PickerSource[] };
+type PickerRequest = { pickId: string; origin: string; sources: PickerSource[] };
+
+/** Host of an origin for display ('' when absent or opaque). */
+function hostOf(origin: string): string {
+  try {
+    return new URL(origin).host;
+  } catch {
+    return '';
+  }
+}
 
 /**
- * Voksa's own screen-share picker (Capture Handshake). Shown when a page calls
- * getDisplayMedia; main enumerated the sources and stripped the thumbnails of
- * any Voksa surface (a thumbnail predates masking). Selecting a Voksa surface
- * arms Stream Mode and waits for masking before the stream is delivered, so
- * the far side's first frame is already masked; the picker says so.
+ * Voksa's own screen-share picker (Capture Handshake). Shown when a page asks
+ * to capture the screen; main enumerated the sources and stripped the
+ * thumbnails of any Voksa surface (a thumbnail predates masking). The pick IS
+ * the capture consent (nothing is granted before it), so the picker names the
+ * requesting site. Selecting a Voksa surface arms Stream Mode and waits for
+ * masking before the capture starts, so the far side's first frame is already
+ * masked; the picker says so.
  */
 export function CapturePicker({
   onOpenChange,
@@ -29,10 +40,14 @@ export function CapturePicker({
   const t = useT();
   const [request, setRequest] = useState<PickerRequest | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // A hostname is user content (an intranet name, a private service): masked
+  // like every other chrome surface.
+  const site = useMaskedText(hostOf(request?.origin ?? ''));
 
   useEffect(() => {
-    // Queueing is unnecessary: getDisplayMedia is user-initiated and serial.
-    // A new request replaces any stale one (the old page gave up).
+    // Queueing is unnecessary: main never opens a second picker in a window
+    // while one is pending (it refuses the request), so a new payload only
+    // follows an answered or timed-out one.
     return voksa.capture.onPickerShow((payload) => {
       setRequest(payload);
       setSelected(null);
@@ -63,7 +78,9 @@ export function CapturePicker({
         <div className="px-5 pt-5 pb-3">
           <h2 className="text-md font-semibold text-fg">{t('Partager votre écran')}</h2>
           <p className="mt-1 text-[13px] text-fg-muted">
-            {t('Choisissez ce que vous voulez partager. Une fenêtre Voksa est masquée avant la première image envoyée.')}
+            {site
+              ? t('Choisissez ce que vous voulez partager avec {site}. Une fenêtre Voksa est masquée avant la première image envoyée.', { site })
+              : t('Choisissez ce que vous voulez partager. Une fenêtre Voksa est masquée avant la première image envoyée.')}
           </p>
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto px-5 pb-3 space-y-4">

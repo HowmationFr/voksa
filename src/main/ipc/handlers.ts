@@ -226,6 +226,10 @@ export function registerIpcHandlers(): void {
           }
         }, 30000);
       }),
+    // Every screen/window/tab capture request (getDisplayMedia AND legacy
+    // getUserMedia chromeMediaSource) is gated by OUR picker at permission
+    // time; see captureHandshake.gatePermission.
+    gateDisplayCapture: (wc, req, grant) => getCaptureHandshake().gatePermission(wc, req, grant),
   });
 
   // --- Network guards (HTTP auth dialog + TLS interstitial) ----------------
@@ -551,11 +555,11 @@ export function registerIpcHandlers(): void {
   // Capture Handshake: own the display-media picker so a shared Voksa surface
   // is masked before its first frame. Installed once (defaultSession global).
   getCaptureHandshake().install();
-  ipcMain.on(IPC.CAPTURE_PICKER_PICK, (_e, payload: { pickId: string; sourceId: string | null }) => {
-    getCaptureHandshake().resolvePick(payload?.pickId, payload?.sourceId ?? null);
+  ipcMain.on(IPC.CAPTURE_PICKER_PICK, (e, payload: { pickId: string; sourceId: string | null }) => {
+    getCaptureHandshake().resolvePick(payload?.pickId, payload?.sourceId ?? null, e.sender);
   });
-  // Debug-only: exercise the handshake without Chromium's getDisplayMedia
-  // (which does not reach setDisplayMediaRequestHandler under CDP). Inert in
+  // Debug-only: exercise the chrome-UI picker path of the handshake (the web
+  // path is driven for real by the smoke through getDisplayMedia). Inert in
   // production: returns null unless the debug CDP port is set (smoke/debug).
   ipcMain.handle(IPC.CAPTURE_SIMULATE, async (e) => {
     if (!process.env.VOKSA_DEBUG_PORT) return null;

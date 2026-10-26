@@ -7,6 +7,16 @@ export type PermissionRequest = {
   permission: string;
 };
 
+/** What the screen-capture gate needs to know about a 'display-capture' request. */
+export type DisplayCaptureRequest = {
+  /** URL.origin of the requesting frame: who the picker says is asking. */
+  origin: string;
+  /** details.securityOrigin, raw: the string the display-media request repeats. */
+  securityOrigin: string;
+  requestingUrl: string;
+  isMainFrame: boolean;
+};
+
 export type PermissionDeps = {
   getStreamConfig: () => StreamModeConfig;
   /** chromeView / internal pages are always allowed (their own clipboard etc.). */
@@ -31,6 +41,21 @@ export type PermissionDeps = {
     req: PermissionRequest,
     requester: WebContents | null,
   ) => Promise<{ allow: boolean; remember: boolean }>;
+  /**
+   * Screen-capture gate. Since Electron 45, getDisplayMedia AND the legacy
+   * getUserMedia({chromeMediaSource}) path both reach the request handler as
+   * 'display-capture' with identical details, and on the legacy path the
+   * grant IS the capture (of a source the page chose, the whole desktop when
+   * it names none). So the grant is never unconditional: the Capture
+   * Handshake shows OUR picker first, binds the pick to this requester and
+   * calls `grant` itself (captureHandshake.gatePermission). Calls `grant`
+   * exactly once; never used for the chrome UI.
+   */
+  gateDisplayCapture: (
+    requester: WebContents,
+    req: DisplayCaptureRequest,
+    grant: (allowed: boolean) => void,
+  ) => Promise<void>;
 };
 
 // Hard-denied whenever Stream Mode is ON (a streamer must never leak these).
@@ -39,11 +64,11 @@ export type PermissionDeps = {
 // tests can pin the decision matrix.
 //
 // 'display-capture' is NOT in this list (it was, before the Capture
-// Handshake): the permission only lets a getDisplayMedia request REACH the
-// display-media picker, where the real consent lives (a user click on one
-// specific source, in OUR ui) and where Voksa surfaces are masked before the
-// first frame is delivered. Hard-denying it here killed the core use case:
-// sharing a window in Meet WHILE Stream Mode is on.
+// Handshake): it is gated by OUR picker in both stream states (see the
+// display-capture branch below), which is where the real consent lives (a
+// user click on one specific source, in OUR ui) and where Voksa surfaces are
+// masked before the first frame is delivered. Hard-denying it here killed the
+// core use case: sharing a window in Meet WHILE Stream Mode is on.
 export const STREAM_HARD_DENY = new Set([
   'notifications',
   'clipboard-read',
@@ -78,13 +103,43 @@ export function installPermissionHandlers(session: Session, deps: PermissionDeps
       return;
     }
 
-    // Screen sharing: granted at THIS layer in both stream states, because
-    // this grant only forwards the request to the display-media picker
-    // (Capture Handshake). Consent is the user's click on one source there;
-    // an extra permission prompt before the picker would be two dialogs for
-    // one question (Chrome prompts nothing here either).
+    // Screen / window / tab capture. Electron 45 reports getDisplayMedia AND
+    // the legacy getUserMedia({chromeMediaSource}) path here, with identical
+    // details, and on the legacy path this grant IS the capture (no picker,
+    // the page's own source id, the whole desktop when it names none). So it
+    // is never granted outright: the Capture Handshake shows OUR picker now,
+    // in both stream states, binds the pick to this requester and only then
+    // grants; getDisplayMedia receives exactly that pick. Still one dialog:
+    // the picker is the consent (Chrome prompts nothing before its own either).
+    // A remembered DENY is honored; a remembered ALLOW never is, every capture
+    // needs a fresh pick.
     if (permission === 'display-capture') {
-      callback(true);
+      const d = details as
+        { requestingUrl?: string; securityOrigin?: string; isMainFrame?: boolean } | undefined;
+      const requestingUrl = d?.requestingUrl ?? (wc ? wc.getURL() : '');
+      const origin = safeOrigin(requestingUrl);
+      if (!wc || (origin && deps.getRemembered(origin, permission) === 'deny')) {
+        callback(false);
+        return;
+      }
+      let answered = false;
+      const grant = (allowed: boolean) => {
+        if (answered) return;
+        answered = true;
+        callback(allowed);
+      };
+      void deps
+        .gateDisplayCapture(
+          wc,
+          {
+            origin,
+            securityOrigin: d?.securityOrigin ?? '',
+            requestingUrl,
+            isMainFrame: d?.isMainFrame !== false,
+          },
+          grant,
+        )
+        .catch(() => grant(false));
       return;
     }
 
@@ -102,6 +157,10 @@ export function installPermissionHandlers(session: Session, deps: PermissionDeps
 
     if (cfg.enabled) {
       if (permission === 'media') {
+        // Electron 45: 'media' is camera/microphone only (screen capture is
+        // 'display-capture' above). An empty/missing mediaTypes no longer
+        // means a screen share; it stays as the fail-closed default for a
+        // device request that arrives without details.
         const types = (details as { mediaTypes?: string[] } | undefined)?.mediaTypes ?? [];
         const wantsVideo = types.includes('video');
         const wantsAudio = types.includes('audio');
@@ -152,9 +211,15 @@ export function installPermissionHandlers(session: Session, deps: PermissionDeps
 
   session.setPermissionCheckHandler((wc, permission, origin, details) => {
     if (deps.isChromeContents(wc)) return true;
-    // NB: 'display-capture' is handled only in the REQUEST handler above (it is
-    // not in Electron's check-handler permission union): getDisplayMedia goes
-    // through the request path, where the picker provides consent.
+    // 'display-capture' reaches this handler too
+    // (navigator.permissions.query({name: 'display-capture'})). A check is
+    // capability reporting, never a grant: the picker gate in the request
+    // handler is the consent. Report it usable in both stream states (a
+    // 'denied' while streaming could make a meeting site hide its share
+    // button) unless the user blocked the site.
+    if (permission === 'display-capture') {
+      return deps.getRemembered(safeOrigin(origin) || (origin ?? ''), permission) !== 'deny';
+    }
     //
     // Audio-routed tab: the 'media' check gates enumerateDevices label/id
     // exposure, without which no frame could ever resolve the chosen label
@@ -165,11 +230,10 @@ export function installPermissionHandlers(session: Session, deps: PermissionDeps
     // permissions.query({name:'camera'}) read granted) on origins that never
     // earned it. A CHECK is capability reporting, never a capture grant:
     // getUserMedia still flows through the request handler above, stream
-    // denies included. 'speaker-selection' needs no twin here: like
-    // display-capture, it is not in Electron's check-handler union (request
-    // path only). Cost, owned: the routed tab's origins can read AUDIO device
-    // labels (fingerprint surface), paid only on tabs the user explicitly
-    // routed.
+    // denies included. 'speaker-selection' gets no carve-out here: setSinkId
+    // is gated on the request path. Cost, owned: the routed tab's origins can
+    // read AUDIO device labels (fingerprint surface), paid only on tabs the
+    // user explicitly routed.
     if (
       permission === 'media' &&
       (details as { mediaType?: string } | undefined)?.mediaType !== 'video' &&

@@ -58,6 +58,8 @@ export const enChrome: Record<string, string> = {
     'No capturable surface was found on this system.',
   'Choisissez ce que vous voulez partager. Une fenêtre Voksa est masquée avant la première image envoyée.':
     'Choose what to share. A Voksa window is masked before the first frame is sent.',
+  'Choisissez ce que vous voulez partager avec {site}. Une fenêtre Voksa est masquée avant la première image envoyée.':
+    'Choose what to share with {site}. A Voksa window is masked before the first frame is sent.',
   'Écrans': 'Screens',
   'Fenêtres': 'Windows',
   'Voksa (masqué)': 'Voksa (masked)',

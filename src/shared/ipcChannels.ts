@@ -99,8 +99,8 @@ export const IPC = {
   // the UI answers with the chosen source id (or null = cancelled).
   CAPTURE_PICKER_SHOW: 'stream:capturePickerShow',
   CAPTURE_PICKER_PICK: 'stream:capturePickerPick',
-  // Debug-only (smoke): drive the handshake without Chromium's getDisplayMedia,
-  // which does not route to setDisplayMediaRequestHandler under CDP.
+  // Debug-only (smoke): drive the chrome-UI picker path of the handshake (the
+  // web path is driven for real through getDisplayMedia).
   CAPTURE_SIMULATE: 'stream:captureSimulate',
   // Go-Live Preflight: scan Voksa's tabs for what a viewer could catch.
   PREFLIGHT_RUN: 'stream:preflightRun',

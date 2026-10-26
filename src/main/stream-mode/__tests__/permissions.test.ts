@@ -9,7 +9,12 @@ import {
 import { DEFAULT_STREAM_CONFIG, type StreamModeConfig } from '../../../shared/streamConfig';
 import type { PermissionDecision } from '../../../shared/types';
 
-type RequestDetails = { mediaTypes?: string[]; requestingUrl?: string };
+type RequestDetails = {
+  mediaTypes?: string[];
+  requestingUrl?: string;
+  securityOrigin?: string;
+  isMainFrame?: boolean;
+};
 type RequestHandler = (
   wc: WebContents | null,
   permission: string,
@@ -77,6 +82,7 @@ function setup(
     config?: Partial<StreamModeConfig>;
     remembered?: Record<string, Record<string, PermissionDecision>>;
     prompt?: PermissionDeps['promptUser'];
+    gate?: PermissionDeps['gateDisplayCapture'];
   } = {},
 ) {
   let requestHandler: RequestHandler | undefined;
@@ -95,6 +101,10 @@ function setup(
   const promptImpl: PermissionDeps['promptUser'] =
     opts.prompt ?? (async () => ({ allow: false, remember: false }));
   const promptUser = vi.fn(promptImpl);
+  // Default gate: the user never answers (the grant must not happen early).
+  const gateImpl: PermissionDeps['gateDisplayCapture'] =
+    opts.gate ?? (() => new Promise<void>(() => {}));
+  const gateDisplayCapture = vi.fn(gateImpl);
   const config: StreamModeConfig = { ...DEFAULT_STREAM_CONFIG, ...opts.config };
 
   installPermissionHandlers(session, {
@@ -104,6 +114,7 @@ function setup(
     getRemembered: (origin, permission) => rememberedStore[origin]?.[permission],
     remember,
     promptUser,
+    gateDisplayCapture,
   });
 
   /** Drive the request handler; probe.granted stays undefined until the callback fires. */
@@ -126,8 +137,11 @@ function setup(
     details?: CheckDetails,
   ) => checkHandler!(wc, permission, origin, details);
 
-  return { request, check, remember, promptUser };
+  return { request, check, remember, promptUser, gateDisplayCapture };
 }
+
+/** Sentinel for a web page webContents (display-capture needs a requester). */
+const PAGE_WC = { id: 555, getURL: () => PAGE_URL } as unknown as WebContents;
 
 describe('decision lists', () => {
   it('test mirrors match the exported sets exactly (drift goes red both ways)', () => {
@@ -233,20 +247,104 @@ describe('installPermissionHandlers, Stream Mode ON', () => {
     }
   });
 
-  it('forwards display-capture to the picker in BOTH stream states, without prompting', () => {
-    // The Capture Handshake moved the consent into the display-media picker:
-    // granting the PERMISSION only lets getDisplayMedia reach it. Hard-denying
-    // under stream killed the core use case (sharing a window in Meet WHILE
-    // streaming); prompting when off would be two dialogs for one question.
-    // getDisplayMedia flows through the REQUEST handler only; display-capture
-    // is not in Electron's check-handler union, so the check path is moot.
-    const on = setup({ config: { enabled: true } });
-    expect(on.request('display-capture', { requestingUrl: PAGE_URL }).granted).toBe(true);
-    expect(on.promptUser).not.toHaveBeenCalled();
+  it('display-capture is gated by the picker in BOTH stream states, never granted up front', () => {
+    // Electron 45: getDisplayMedia AND legacy getUserMedia({chromeMediaSource})
+    // both arrive here as 'display-capture', and on the legacy path the grant
+    // IS the capture. So nothing is granted before the gate (OUR picker)
+    // answers; hard-denying under stream would kill the core use case
+    // (sharing a window in Meet WHILE streaming), and a prompt on top of the
+    // picker would be two dialogs for one question.
+    for (const enabled of [true, false]) {
+      const { request, promptUser, gateDisplayCapture } = setup({ config: { enabled } });
+      const details: RequestDetails = {
+        requestingUrl: PAGE_URL,
+        securityOrigin: `${ORIGIN}/`,
+        isMainFrame: true,
+        mediaTypes: ['video'],
+      };
+      const probe = request('display-capture', details, PAGE_WC);
+      expect(probe.granted, `stream ${enabled}`).toBeUndefined();
+      expect(gateDisplayCapture).toHaveBeenCalledWith(
+        PAGE_WC,
+        {
+          origin: ORIGIN,
+          securityOrigin: `${ORIGIN}/`,
+          requestingUrl: PAGE_URL,
+          isMainFrame: true,
+        },
+        expect.any(Function),
+      );
+      expect(promptUser).not.toHaveBeenCalled();
+    }
+  });
 
-    const off = setup({ config: { enabled: false } });
-    expect(off.request('display-capture', { requestingUrl: PAGE_URL }).granted).toBe(true);
-    expect(off.promptUser).not.toHaveBeenCalled();
+  it('display-capture follows the gate answer, exactly once', async () => {
+    let grantFn!: (allowed: boolean) => void;
+    const { request } = setup({
+      config: { enabled: true },
+      gate: async (_wc, _req, grant) => {
+        grantFn = grant;
+      },
+    });
+    const probe = request('display-capture', { requestingUrl: PAGE_URL }, PAGE_WC);
+    grantFn(true);
+    expect(probe.granted).toBe(true);
+    // A second answer (late timeout, double click) never reaches Electron.
+    grantFn(false);
+    expect(probe.granted).toBe(true);
+
+    const cancelled = setup({ gate: async (_wc, _req, grant) => grant(false) });
+    expect(cancelled.request('display-capture', { requestingUrl: PAGE_URL }, PAGE_WC).granted).toBe(
+      false,
+    );
+  });
+
+  it('display-capture fails closed when the gate throws or there is no requester', async () => {
+    const thrown = setup({
+      gate: () => Promise.reject(new Error('picker torn down')),
+    });
+    const probe = thrown.request('display-capture', { requestingUrl: PAGE_URL }, PAGE_WC);
+    await flushPromises();
+    expect(probe.granted).toBe(false);
+
+    const orphan = setup();
+    expect(orphan.request('display-capture', { requestingUrl: PAGE_URL }, null).granted).toBe(
+      false,
+    );
+    expect(orphan.gateDisplayCapture).not.toHaveBeenCalled();
+  });
+
+  it('display-capture: a remembered deny blocks without a picker; a remembered allow never skips it', () => {
+    const blocked = setup({ remembered: { [ORIGIN]: { 'display-capture': 'deny' } } });
+    expect(blocked.request('display-capture', { requestingUrl: PAGE_URL }, PAGE_WC).granted).toBe(
+      false,
+    );
+    expect(blocked.gateDisplayCapture).not.toHaveBeenCalled();
+
+    // Every capture needs a fresh pick, and camera/microphone consent
+    // ('media') does not cover the screen.
+    const allowed = setup({
+      remembered: { [ORIGIN]: { 'display-capture': 'allow', media: 'allow' } },
+    });
+    const probe = allowed.request('display-capture', { requestingUrl: PAGE_URL }, PAGE_WC);
+    expect(probe.granted).toBeUndefined();
+    expect(allowed.gateDisplayCapture).toHaveBeenCalledOnce();
+  });
+
+  it('check handler: display-capture reads usable in both stream states unless blocked', () => {
+    // Capability reporting only (permissions.query): a 'denied' while
+    // streaming could make a meeting site hide its share button.
+    for (const enabled of [true, false]) {
+      expect(setup({ config: { enabled } }).check('display-capture'), `stream ${enabled}`).toBe(
+        true,
+      );
+      const blocked = setup({
+        config: { enabled },
+        remembered: { [ORIGIN]: { 'display-capture': 'deny' } },
+      });
+      // Electron sends the origin with a trailing slash.
+      expect(blocked.check('display-capture', `${ORIGIN}/`), `stream ${enabled}`).toBe(false);
+    }
   });
 
   it('audio-routed tab (DMCA stage 2): labels + setSinkId pass, capture stays denied', () => {
@@ -296,6 +394,9 @@ describe('installPermissionHandlers, Stream Mode ON', () => {
     const off = setup({ config: { enabled: false } });
     expect(off.request('display-capture', undefined, CHROME_WC).granted).toBe(true);
     expect(off.promptUser).not.toHaveBeenCalled();
+    // The chrome UI never goes through the web-content capture gate.
+    expect(on.gateDisplayCapture).not.toHaveBeenCalled();
+    expect(off.gateDisplayCapture).not.toHaveBeenCalled();
   });
 });
 

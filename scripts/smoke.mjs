@@ -3005,10 +3005,24 @@ async function main() {
   });
 
   // Level 2: the same, opened FROM the popup. This is the level that used to be
-  // a bare BrowserWindow (no preload, no guard).
-  const opened2 = await chain1.evaluate(
-    `!!window.open(${J(chain2Url)}, 'voksa-chain-2', 'popup,width=560,height=440')`,
-    { userGesture: true },
+  // a bare BrowserWindow (no preload, no guard). Only CDP errors are retried
+  // (lived: this one-shot failed once on macOS CI with "CDP socket closed (popup
+  // level 1)"), so a level 1 popup that is really gone still fails on the
+  // deadline. A call that landed before its socket closed is not repeated: its
+  // window is listed by then.
+  const { value: opened2 } = await waitFor(
+    'window.open from the popup',
+    async () => {
+      const listed = (await listTargets()).some((t) => t.type === 'page' && t.url === chain2Url);
+      if (listed) return { value: true };
+      return {
+        value: await chain1.evaluate(
+          `!!window.open(${J(chain2Url)}, 'voksa-chain-2', 'popup,width=560,height=440')`,
+          { userGesture: true },
+        ),
+      };
+    },
+    STEP_TIMEOUT_MS,
   );
   if (opened2 !== true) throw new Error('window.open from a popup was refused (returned null)');
   const chain2 = await connectPageTarget(

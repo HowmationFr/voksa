@@ -1,4 +1,5 @@
 import { DEFAULT_STREAM_COLOR } from './streamColor';
+import type { CustomReplacement } from './maskPatterns';
 
 export type StreamModeConfig = {
   enabled: boolean;
@@ -45,6 +46,12 @@ export type StreamModeConfig = {
    */
   customMasks: string[];
   /**
+   * User-defined find → replace pairs (case-insensitive): unlike customMasks,
+   * the user picks what is displayed instead (a pseudonym, a generic name).
+   * Applied before every other mask, see maskText.
+   */
+  customReplacements: CustomReplacement[];
+  /**
    * Accent color of every Stream Mode surface in the chrome UI (window ring,
    * toolbar shield, badges): hex `#rrggbb`, the light and dark palettes are
    * derived from it (see streamColor.ts). Purely cosmetic: it never changes
@@ -76,7 +83,9 @@ export function sameMaskingConfig(a: StreamModeConfig, b: StreamModeConfig): boo
     const va = (a as Record<string, unknown>)[key];
     const vb = (b as Record<string, unknown>)[key];
     if (Array.isArray(va) && Array.isArray(vb)) {
-      if (va.length !== vb.length || va.some((v, i) => v !== vb[i])) return false;
+      // Items may be objects (customReplacements), rebuilt on every settings
+      // load: compare by value, not reference.
+      if (va.length !== vb.length || JSON.stringify(va) !== JSON.stringify(vb)) return false;
     } else if (va !== vb) {
       return false;
     }
@@ -102,6 +111,7 @@ export const DEFAULT_STREAM_CONFIG: StreamModeConfig = {
   hideHistory: true,
   autoStreamOnRecorder: true,
   customMasks: [],
+  customReplacements: [],
   color: DEFAULT_STREAM_COLOR,
 };
 

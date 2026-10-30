@@ -604,7 +604,7 @@ export function registerIpcHandlers(): void {
       isActive: win.tabs.isActiveTab(t.id),
       isInternal: t.isInternal,
     }));
-    return runPreflight(tabs, flags, os.hostname(), cfg.customMasks);
+    return runPreflight(tabs, flags, os.hostname(), cfg.customMasks, cfg.customReplacements);
   });
 
   // Doc-nonce protocol: a new document started masking / finished its initial

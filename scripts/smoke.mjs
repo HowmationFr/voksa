@@ -1308,6 +1308,59 @@ async function main() {
   }
   pass('STREAM MASKS LIVE PAGES');
 
+  // --- 6b. CUSTOM REPLACEMENTS ----------------------------------------------
+  // The chosen text shows instead of the match. The replacement here holds its
+  // own `from`: the masker observes its own write as a mutation, and must
+  // re-mask from the original or the text grows on every pass (my-my-server…).
+  // Removing the pair must then bring the original text back, live.
+  const countOf = (text, needle) => text.split(needle).length - 1;
+  await ui.evaluate(
+    `window.voksa.stream.update({ customReplacements: [{ from: 'server', to: 'my-server' }] })`,
+  );
+  await waitFor(
+    'custom replacement shown on the live page',
+    async () => {
+      state = await page.evaluate(PAGE_STATE_EXPR);
+      return state.body.includes('my-server:') && !state.body.includes(PROBE_IP);
+    },
+    STREAM_TIMEOUT_MS,
+  );
+  await page.evaluate(
+    `document.body.appendChild(document.createElement('p')).textContent = 'second server'`,
+  );
+  await waitFor(
+    'custom replacement applied to new content',
+    async () => {
+      state = await page.evaluate(PAGE_STATE_EXPR);
+      return state.body.includes('second my-server');
+    },
+    STREAM_TIMEOUT_MS,
+  );
+  // Let any self-feeding mutation loop run before counting.
+  await sleep(300);
+  state = await page.evaluate(PAGE_STATE_EXPR);
+  if (countOf(state.body, 'my-server') !== 2 || state.body.includes('my-my-server')) {
+    throw new Error(
+      `replacement re-applied to its own output: ${JSON.stringify(state.body)} (streamMask.ts maskTextNode must re-mask its own write from the original)`,
+    );
+  }
+  await ui.evaluate(`window.voksa.stream.update({ customReplacements: [] })`);
+  await waitFor(
+    'removing the replacement restores the original text, still masked',
+    async () => {
+      state = await page.evaluate(PAGE_STATE_EXPR);
+      return (
+        !state.body.includes('my-server') &&
+        state.body.includes('server:') &&
+        state.body.includes('second server') &&
+        !state.body.includes(PROBE_IP)
+      );
+    },
+    STREAM_TIMEOUT_MS,
+  );
+  await page.evaluate(`document.body.lastElementChild.remove()`);
+  pass('STREAM CUSTOM REPLACEMENTS');
+
   // --- 7. STREAM NAVIGATION NOT STUCK ------------------------------------------
   await ui.evaluate(
     `window.voksa.tabs.navigate(${JSON.stringify(tabId)}, ${JSON.stringify(page2Url)})`,
@@ -2952,10 +3005,24 @@ async function main() {
   });
 
   // Level 2: the same, opened FROM the popup. This is the level that used to be
-  // a bare BrowserWindow (no preload, no guard).
-  const opened2 = await chain1.evaluate(
-    `!!window.open(${J(chain2Url)}, 'voksa-chain-2', 'popup,width=560,height=440')`,
-    { userGesture: true },
+  // a bare BrowserWindow (no preload, no guard). Only CDP errors are retried
+  // (lived: this one-shot failed once on macOS CI with "CDP socket closed (popup
+  // level 1)"), so a level 1 popup that is really gone still fails on the
+  // deadline. A call that landed before its socket closed is not repeated: its
+  // window is listed by then.
+  const { value: opened2 } = await waitFor(
+    'window.open from the popup',
+    async () => {
+      const listed = (await listTargets()).some((t) => t.type === 'page' && t.url === chain2Url);
+      if (listed) return { value: true };
+      return {
+        value: await chain1.evaluate(
+          `!!window.open(${J(chain2Url)}, 'voksa-chain-2', 'popup,width=560,height=440')`,
+          { userGesture: true },
+        ),
+      };
+    },
+    STEP_TIMEOUT_MS,
   );
   if (opened2 !== true) throw new Error('window.open from a popup was refused (returned null)');
   const chain2 = await connectPageTarget(

@@ -30,5 +30,5 @@ export function useMaskedText(text: string | null | undefined): string {
     maskMacAddresses: config.maskMacAddresses,
     maskInternalHostnames: config.maskInternalHostnames,
   };
-  return maskText(text, flags, hostname, config.customMasks);
+  return maskText(text, flags, hostname, config.customMasks, config.customReplacements);
 }

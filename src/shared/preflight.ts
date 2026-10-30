@@ -12,7 +12,7 @@
  * Honest scope, stated in the UI: this audits VOKSA. It cannot see a Discord
  * window, a desktop notification, or the rest of the screen.
  */
-import { maskText, type MaskFlags } from './maskPatterns';
+import { maskText, type CustomReplacement, type MaskFlags } from './maskPatterns';
 
 export type PreflightTab = {
   id: string;
@@ -45,8 +45,9 @@ export type PreflightReport = {
 };
 
 /**
- * Scan the given tabs against the mask config. `flags`/`hostname`/`customMasks`
- * are the SAME inputs the masker uses, so a finding here is precisely what
+ * Scan the given tabs against the mask config. `flags`, `hostname`,
+ * `customMasks` and `customReplacements` are the SAME inputs the masker uses,
+ * so a finding here is precisely what
  * Stream Mode would mask on the page.
  */
 export function runPreflight(
@@ -54,6 +55,7 @@ export function runPreflight(
   flags: MaskFlags,
   hostname: string | null,
   customMasks: readonly string[],
+  customReplacements: readonly CustomReplacement[] = [],
 ): PreflightReport {
   const findings: PreflightFinding[] = [];
   let scanned = 0;
@@ -64,8 +66,8 @@ export function runPreflight(
     if (tab.isInternal) continue;
     scanned += 1;
 
-    const maskedTitle = maskText(tab.title, flags, hostname, customMasks);
-    const maskedUrl = maskText(tab.url, flags, hostname, customMasks);
+    const maskedTitle = maskText(tab.title, flags, hostname, customMasks, customReplacements);
+    const maskedUrl = maskText(tab.url, flags, hostname, customMasks, customReplacements);
     const titleHit = maskedTitle !== tab.title;
     const urlHit = maskedUrl !== tab.url;
     if (titleHit || urlHit) {

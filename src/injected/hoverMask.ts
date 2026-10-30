@@ -39,7 +39,7 @@ export function installHoverMasker(host: MaskerHost): void {
 
   function maskUrl(url: string): string {
     if (!config) return url;
-    return maskText(url, flags(), host.getHostname(), config.customMasks);
+    return maskText(url, flags(), host.getHostname(), config.customMasks, config.customReplacements);
   }
 
   function shouldMask(): boolean {

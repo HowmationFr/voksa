@@ -144,16 +144,43 @@ function escapeRegExp(s: string): string {
 /**
  * Mask a single string. Stateless and identical across all three worlds. The
  * caller supplies which categories are active, the local machine hostname
- * (for internal-hostname masking) and the user's custom substrings.
+ * (for internal-hostname masking), the user's custom substrings and their
+ * find → replace pairs.
  */
 export function maskText(
   input: string,
   flags: MaskFlags,
   hostname: string | null,
   customMasks: readonly string[] = [],
+  customReplacements: readonly CustomReplacement[] = [],
 ): string {
   if (!input) return input;
   let out = input;
+
+  // First, on the raw text: the user's own wording replaces the secret before
+  // any built-in pattern runs, so `192.168.1.10` → `mon-serveur` shows the
+  // chosen text, not a placeholder. A replacement that itself looks like an
+  // email or an IP is still masked below: the safe outcome wins.
+  const replacements = activeReplacements(customReplacements);
+  if (replacements.length > 0) {
+    const byKey = new Map<string, string>();
+    for (const r of replacements) {
+      const key = r.from.toLowerCase();
+      if (!byKey.has(key)) byKey.set(key, r.to);
+    }
+    // Longest first: `Jean Dupont` must win over `Jean` at the same position.
+    const alt = [...byKey.keys()]
+      .sort((a, b) => b.length - a.length)
+      .map(escapeRegExp)
+      .join('|');
+    // One pass: a replacement is never re-scanned, so `to` may contain `from`.
+    out = out.replace(
+      new RegExp(alt, 'gi'),
+      // A match whose lower case differs from its key (rare Unicode folding)
+      // falls back to bullets: never show the original.
+      (m) => byKey.get(m.toLowerCase()) ?? '•'.repeat(Math.max(3, m.length)),
+    );
+  }
 
   if (flags.maskIPv4) {
     out = out.replace(IPV4_RE, (m) => (isPrivateIPv4(m) ? m : MASK.IPV4));
@@ -190,8 +217,35 @@ export function maskText(
   return out;
 }
 
-/** True if any masking category (or custom masks) would change output. */
-export function hasAnyMask(flags: MaskFlags, customMasks: readonly string[] = []): boolean {
+/**
+ * A user-defined find → replace pair: every case-insensitive match of `from`
+ * is displayed as `to` (which may be empty). Like custom masks, `from` needs
+ * at least 2 characters once trimmed.
+ */
+export type CustomReplacement = { from: string; to: string };
+
+/**
+ * The pairs that apply, `from` trimmed. Defensive about shape: the config
+ * comes from settings.json and an IPC patch, neither of which is validated.
+ */
+function activeReplacements(list: readonly CustomReplacement[]): CustomReplacement[] {
+  const out: CustomReplacement[] = [];
+  if (!Array.isArray(list)) return out;
+  for (const r of list) {
+    if (!r || typeof r.from !== 'string') continue;
+    const from = r.from.trim();
+    if (from.length < 2) continue;
+    out.push({ from, to: typeof r.to === 'string' ? r.to : '' });
+  }
+  return out;
+}
+
+/** True if any masking category (or custom masks / replacements) would change output. */
+export function hasAnyMask(
+  flags: MaskFlags,
+  customMasks: readonly string[] = [],
+  customReplacements: readonly CustomReplacement[] = [],
+): boolean {
   return (
     flags.maskIPv4 ||
     flags.maskIPv6 ||
@@ -199,6 +253,7 @@ export function hasAnyMask(flags: MaskFlags, customMasks: readonly string[] = []
     flags.maskPhones ||
     flags.maskMacAddresses ||
     flags.maskInternalHostnames ||
-    customMasks.some((s) => s.trim().length >= 2)
+    customMasks.some((s) => s.trim().length >= 2) ||
+    activeReplacements(customReplacements).length > 0
   );
 }

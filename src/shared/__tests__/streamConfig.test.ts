@@ -28,6 +28,18 @@ describe('sameMaskingConfig', () => {
     expect(sameMaskingConfig(base(), { ...base(), customMasks: ['ACME'] })).toBe(false);
   });
 
+  it('compares customReplacements by value', () => {
+    const pairs = () => [{ from: 'acme', to: 'corp' }];
+    const a = { ...base(), customReplacements: pairs() };
+    // A fresh array of fresh objects (every settings load) is the same config.
+    expect(sameMaskingConfig(a, { ...base(), customReplacements: pairs() })).toBe(true);
+    expect(sameMaskingConfig(a, { ...a, color: '#00ff00' })).toBe(true);
+    expect(
+      sameMaskingConfig(a, { ...base(), customReplacements: [{ from: 'acme', to: 'other' }] }),
+    ).toBe(false);
+    expect(sameMaskingConfig(a, base())).toBe(false);
+  });
+
   it('fails closed on unknown future fields', () => {
     // A field added to StreamModeConfig but not to the cosmetic deny-list
     // must count as mask-relevant: frames get re-pushed, coverage re-checked.

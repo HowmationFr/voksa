@@ -117,6 +117,69 @@ describe('custom masks', () => {
   });
 });
 
+describe('custom replacements', () => {
+  const NONE: MaskFlags = {
+    maskIPv4: false,
+    maskIPv6: false,
+    maskEmails: false,
+    maskPhones: false,
+    maskMacAddresses: false,
+    maskInternalHostnames: false,
+  };
+  const rep = (s: string, pairs: { from: string; to: string }[], flags: MaskFlags = NONE) =>
+    maskText(s, flags, null, [], pairs);
+
+  it('shows the chosen text instead of each match, case-insensitively', () => {
+    expect(rep('Valentin et VALENTIN', [{ from: 'valentin', to: 'Val' }])).toBe('Val et Val');
+  });
+  it('accepts an empty replacement (erases the string)', () => {
+    expect(rep('Projet [Falcon]', [{ from: 'Falcon', to: '' }])).toBe('Projet []');
+  });
+  it('never re-scans its own output (`to` may contain `from`)', () => {
+    expect(rep('Val', [{ from: 'Val', to: 'Valentin' }])).toBe('Valentin');
+    expect(rep('ab ab', [{ from: 'ab', to: 'abab' }])).toBe('abab abab');
+  });
+  it('prefers the longest match at the same position', () => {
+    const pairs = [
+      { from: 'Jean', to: 'J.' },
+      { from: 'Jean Dupont', to: 'Streamer' },
+    ];
+    expect(rep('Jean Dupont et Jean', pairs)).toBe('Streamer et J.');
+  });
+  it('first pair wins on a duplicate `from`', () => {
+    const pairs = [
+      { from: 'acme', to: 'one' },
+      { from: 'ACME', to: 'two' },
+    ];
+    expect(rep('Acme', pairs)).toBe('one');
+  });
+  it('escapes regex characters and trims `from`', () => {
+    expect(rep('a.b.c and axbxc', [{ from: ' a.b.c ', to: 'X' }])).toBe('X and axbxc');
+  });
+  it('ignores pairs whose `from` is shorter than 2 chars, and malformed entries', () => {
+    const junk = [{ from: 'a', to: 'z' }, null, { from: 42 }, { to: 'x' }] as unknown as {
+      from: string;
+      to: string;
+    }[];
+    expect(rep('a b c', junk)).toBe('a b c');
+    expect(rep('nas01', [{ from: 'nas01', to: undefined as unknown as string }])).toBe('');
+  });
+  it('runs before the built-in masks: a replaced IP shows the chosen text', () => {
+    expect(rep('ping 8.8.8.8', [{ from: '8.8.8.8', to: 'mon-serveur' }], ALL)).toBe(
+      'ping mon-serveur',
+    );
+  });
+  it('still masks a replacement that is itself sensitive', () => {
+    const out = rep('contact: Bob', [{ from: 'Bob', to: 'bob@example.com' }], ALL);
+    expect(out).toBe(`contact: ${MASK.EMAIL}`);
+  });
+  it('counts for hasAnyMask', () => {
+    expect(hasAnyMask(NONE, [], [{ from: 'acme', to: 'x' }])).toBe(true);
+    expect(hasAnyMask(NONE, [], [{ from: ' a ', to: 'x' }])).toBe(false);
+    expect(hasAnyMask(NONE, [], [])).toBe(false);
+  });
+});
+
 describe('internal hostname masking', () => {
   it('masks *.local and the machine hostname when enabled', () => {
     const out = maskText(

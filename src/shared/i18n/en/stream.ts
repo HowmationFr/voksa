@@ -95,6 +95,24 @@ export const enStream: Record<string, string> = {
   'Retirer le mot-clé masqué': 'Remove the masked keyword',
   'Retirer {text}': 'Remove {text}',
 
+  // StreamPage: custom replacements card
+  'Remplacements personnalisés': 'Custom replacements',
+  'Remplacez une chaîne par le texte de votre choix : un vrai nom par un pseudo, une adresse par « mon-serveur ».':
+    'Replace a string with the text of your choice: a real name with a nickname, an address with "my-server".',
+  'Texte à remplacer…': 'Text to replace…',
+  'Texte à remplacer': 'Text to replace',
+  'Texte affiché à la place…': 'Text shown instead…',
+  'Texte affiché à la place': 'Text shown instead',
+  'La recherche est insensible à la casse. Chaque correspondance est remplacée exactement par le texte choisi (laissez-le vide pour effacer la chaîne). Les remplacements passent avant les autres masques : si le texte affiché ressemble lui-même à un email ou une IP, il est masqué.':
+    'Matching is case-insensitive. Every match is replaced with exactly the text you chose (leave it empty to erase the string). Replacements run before the other masks: if the text shown itself looks like an email or an IP, it is masked.',
+  'Aucun remplacement pour le moment.': 'No replacements yet.',
+  '(vide)': '(empty)',
+  'Retirer le remplacement masqué': 'Remove the masked replacement',
+  'Supprimer {n} remplacement ?': 'Delete {n} replacement?',
+  'Supprimer {n} remplacements ?': 'Delete {n} replacements?',
+  '{n} remplacement actif': '{n} active replacement',
+  '{n} remplacements actifs': '{n} active replacements',
+
   // StreamPage: appearance (accent color) card
   'Apparence': 'Appearance',
   'La couleur qui signale le Mode Stream dans l’interface.':

@@ -105,12 +105,15 @@ function createHandle(): FallbackHandle {
   }
 
   function active(): boolean {
-    return !!config?.enabled && hasAnyMask(flags(), config?.customMasks ?? []);
+    return (
+      !!config?.enabled &&
+      hasAnyMask(flags(), config?.customMasks ?? [], config?.customReplacements ?? [])
+    );
   }
 
   function maskString(input: string): string {
     if (!config) return input;
-    return maskText(input, flags(), hostname, config.customMasks);
+    return maskText(input, flags(), hostname, config.customMasks, config.customReplacements);
   }
 
   function ensureStyle(): void {
@@ -133,9 +136,13 @@ function createHandle(): FallbackHandle {
     if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEXTAREA') return;
     if (parent.isContentEditable) return;
     const current = node.data;
-    const next = maskString(current);
+    // Our own write is re-masked from the original, never from its masked
+    // form (same rule as streamMask.ts: a replacement holding a keyword would
+    // grow on every pass, and an edited list must reach rewritten nodes).
+    const ours = writtenText.get(node) === current && originalText.has(node);
+    const next = maskString(ours ? (originalText.get(node) as string) : current);
     if (next === current) return;
-    if (!originalText.has(node)) originalText.set(node, current);
+    if (!ours) originalText.set(node, current);
     writtenText.set(node, next);
     modifiedTextNodes.add(node);
     node.data = next;
@@ -145,15 +152,16 @@ function createHandle(): FallbackHandle {
     for (const name of MASKABLE_ATTRS) {
       const value = el.getAttribute(name);
       if (value == null) continue;
-      const next = maskString(value);
-      if (next === value) continue;
       let originals = originalAttrs.get(el);
+      let written = writtenAttrs.get(el);
+      const ours = written?.get(name) === value && !!originals?.has(name);
+      const next = maskString(ours ? (originals?.get(name) as string) : value);
+      if (next === value) continue;
       if (!originals) {
         originals = new Map();
         originalAttrs.set(el, originals);
       }
-      if (!originals.has(name)) originals.set(name, value);
-      let written = writtenAttrs.get(el);
+      if (!ours) originals.set(name, value);
       if (!written) {
         written = new Map();
         writtenAttrs.set(el, written);

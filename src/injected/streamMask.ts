@@ -81,6 +81,13 @@ export function installStreamMasker(host: MaskerHost): void {
   const originalAttrs = new WeakMap<Element, Map<string, string>>();
   const modifiedAttrEls = new Set<Element>();
   const redactedEls = new Set<Element>();
+  // What we last wrote, to tell our own write from the page's. Our write is
+  // re-masked from the ORIGINAL, never from its masked form: a replacement
+  // whose text holds a keyword would otherwise grow on every pass (the write
+  // is itself a mutation), and an edited list would never reach nodes it
+  // already rewrote.
+  const writtenText = new WeakMap<Text, string>();
+  const writtenAttrs = new WeakMap<Element, Map<string, string>>();
   const shadowObserved = new WeakSet<ShadowRoot>();
 
   // Iframe gate bookkeeping (see the header). `knownFrames` also covers frames
@@ -106,11 +113,14 @@ export function installStreamMasker(host: MaskerHost): void {
 
   function maskString(input: string): string {
     if (!config) return input;
-    return maskText(input, flags(), host.getHostname(), config.customMasks);
+    return maskText(input, flags(), host.getHostname(), config.customMasks, config.customReplacements);
   }
 
   function active(): boolean {
-    return !!config?.enabled && hasAnyMask(flags(), config?.customMasks ?? []);
+    return (
+      !!config?.enabled &&
+      hasAnyMask(flags(), config?.customMasks ?? [], config?.customReplacements ?? [])
+    );
   }
 
   // --- text / attributes -----------------------------------------------------
@@ -121,9 +131,11 @@ export function installStreamMasker(host: MaskerHost): void {
     if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEXTAREA') return;
     if (parent.isContentEditable) return;
     const current = node.data;
-    const next = maskString(current);
+    const ours = writtenText.get(node) === current && originalText.has(node);
+    const next = maskString(ours ? (originalText.get(node) as string) : current);
     if (next !== current) {
-      if (!originalText.has(node)) originalText.set(node, current);
+      if (!ours) originalText.set(node, current);
+      writtenText.set(node, next);
       modifiedTextNodes.add(node);
       node.data = next;
     }
@@ -133,14 +145,21 @@ export function installStreamMasker(host: MaskerHost): void {
     for (const name of MASKABLE_ATTRS) {
       const v = el.getAttribute(name);
       if (v == null) continue;
-      const next = maskString(v);
+      let store = originalAttrs.get(el);
+      let written = writtenAttrs.get(el);
+      const ours = written?.get(name) === v && !!store?.has(name);
+      const next = maskString(ours ? (store?.get(name) as string) : v);
       if (next !== v) {
-        let store = originalAttrs.get(el);
         if (!store) {
           store = new Map();
           originalAttrs.set(el, store);
         }
-        if (!store.has(name)) store.set(name, v);
+        if (!ours) store.set(name, v);
+        if (!written) {
+          written = new Map();
+          writtenAttrs.set(el, written);
+        }
+        written.set(name, next);
         modifiedAttrEls.add(el);
         el.setAttribute(name, next);
       }
@@ -400,11 +419,13 @@ export function installStreamMasker(host: MaskerHost): void {
     for (const node of modifiedTextNodes) {
       const orig = originalText.get(node);
       if (orig != null && node.isConnected) node.data = orig;
+      writtenText.delete(node);
     }
     modifiedTextNodes.clear();
     for (const el of modifiedAttrEls) {
       const store = originalAttrs.get(el);
       if (store) for (const [name, val] of store) el.setAttribute(name, val);
+      writtenAttrs.delete(el);
     }
     modifiedAttrEls.clear();
     for (const el of redactedEls) el.removeAttribute(REDACT_ATTR);

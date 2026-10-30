@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowRight,
   Camera,
   Check,
   CheckCircle2,
@@ -20,6 +21,7 @@ import {
   Pipette,
   Plus,
   Radio,
+  Replace,
   RotateCcw,
   Server,
   Shield,
@@ -40,6 +42,7 @@ import { Toggle } from '../ui/Toggle';
 import { askConfirm } from '../ui/ConfirmDialog';
 import { useT } from '../../lib/i18n';
 import type { StreamModeConfig } from '../../../shared/streamConfig';
+import type { CustomReplacement } from '../../../shared/maskPatterns';
 import {
   DEFAULT_STREAM_COLOR,
   STREAM_COLOR_PRESETS,
@@ -202,7 +205,7 @@ export function StreamPage(): React.ReactElement {
         <HeroHeader
           enabled={config.enabled}
           maskCount={maskCount}
-          customCount={config.customMasks.length}
+          customCount={config.customMasks.length + (config.customReplacements?.length ?? 0)}
           onToggle={() => void toggle()}
         />
 
@@ -249,6 +252,17 @@ export function StreamPage(): React.ReactElement {
           masks={config.customMasks}
           concealed={config.enabled}
           onChange={(list) => void update({ customMasks: list })}
+        />
+
+        <SectionTitle
+          icon={Replace}
+          title={t('Remplacements personnalisés')}
+          subtitle={t('Remplacez une chaîne par le texte de votre choix : un vrai nom par un pseudo, une adresse par « mon-serveur ».')}
+        />
+        <CustomReplacementsCard
+          replacements={config.customReplacements ?? []}
+          concealed={config.enabled}
+          onChange={(list) => void update({ customReplacements: list })}
         />
 
         <SectionTitle
@@ -721,6 +735,162 @@ function MaskChip({
       >
         <X size={11} />
       </button>
+    </div>
+  );
+}
+
+/**
+ * Find → replace pairs. Same shape as CustomMasksCard, with a second field
+ * for the displayed text. While Stream Mode is live, only the `from` side is
+ * a secret: it is concealed, the replacement stays readable (it is what the
+ * viewers see anyway).
+ */
+function CustomReplacementsCard({
+  replacements,
+  concealed,
+  onChange,
+}: {
+  replacements: CustomReplacement[];
+  concealed: boolean;
+  onChange: (list: CustomReplacement[]) => void;
+}): React.ReactElement {
+  const t = useT();
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const fromRef = useRef<HTMLInputElement>(null);
+
+  // Same 2-character floor as maskText: a shorter `from` would never apply.
+  const canAdd = from.trim().length >= 2;
+
+  const add = () => {
+    const trimmed = from.trim();
+    if (trimmed.length < 2) return;
+    const key = trimmed.toLowerCase();
+    // Re-adding a `from` updates its replacement instead of stacking a
+    // duplicate that maskText would ignore anyway (first one wins).
+    const next = replacements.filter((r) => r.from.trim().toLowerCase() !== key);
+    onChange([...next, { from: trimmed, to }]);
+    setFrom('');
+    setTo('');
+    fromRef.current?.focus();
+  };
+
+  const remove = (index: number) => {
+    const next = replacements.slice();
+    next.splice(index, 1);
+    onChange(next);
+  };
+
+  const clear = async () => {
+    if (replacements.length === 0) return;
+    const ok = await askConfirm({
+      title:
+        replacements.length > 1
+          ? t('Supprimer {n} remplacements ?', { n: replacements.length })
+          : t('Supprimer {n} remplacement ?', { n: replacements.length }),
+      confirmLabel: t('Supprimer'),
+      danger: true,
+    });
+    if (ok) onChange([]);
+  };
+
+  const onEnter = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      add();
+    }
+  };
+
+  const inputClass =
+    'w-full h-10 px-3 rounded-lg bg-bg border border-border focus:border-accent focus:outline-none focus:shadow-[0_0_0_3px_rgba(59,125,255,0.12)] text-[13px] transition-all';
+
+  return (
+    <div className="bg-bg-elevated border border-border rounded-xl overflow-hidden mb-10">
+      <div className="p-4 border-b border-border">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+          <input
+            ref={fromRef}
+            type="text"
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+            onKeyDown={onEnter}
+            placeholder={t('Texte à remplacer…')}
+            aria-label={t('Texte à remplacer')}
+            className={`${inputClass} sm:flex-1 ${concealed ? '[-webkit-text-security:disc]' : ''}`}
+          />
+          <ArrowRight size={15} className="hidden sm:block flex-shrink-0 text-fg-muted" />
+          <input
+            type="text"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+            onKeyDown={onEnter}
+            placeholder={t('Texte affiché à la place…')}
+            aria-label={t('Texte affiché à la place')}
+            className={`${inputClass} sm:flex-1`}
+          />
+          <button
+            type="button"
+            onClick={add}
+            disabled={!canAdd}
+            className="flex-shrink-0 inline-flex items-center justify-center gap-1.5 px-4 h-10 rounded-lg bg-accent hover:bg-accent-hover text-white text-[13px] font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <Plus size={15} />
+            {t('Ajouter')}
+          </button>
+        </div>
+        <p className="mt-3 text-[11px] text-fg-muted leading-snug">
+          {t('La recherche est insensible à la casse. Chaque correspondance est remplacée exactement par le texte choisi (laissez-le vide pour effacer la chaîne). Les remplacements passent avant les autres masques : si le texte affiché ressemble lui-même à un email ou une IP, il est masqué.')}
+        </p>
+      </div>
+
+      {replacements.length === 0 ? (
+        <div className="px-4 py-10 text-center text-[12px] text-fg-subtle">
+          {t('Aucun remplacement pour le moment.')}
+        </div>
+      ) : (
+        <>
+          <ul className="divide-y divide-border">
+            {replacements.map((r, i) => (
+              <li key={`${r.from}-${i}`} className="group flex items-center gap-3 px-4 h-11">
+                <span className="text-[12px] font-mono text-fg flex-1 min-w-0 truncate">
+                  {concealed ? '•'.repeat(Math.max(3, r.from.length)) : r.from}
+                </span>
+                <ArrowRight size={13} className="flex-shrink-0 text-fg-muted" />
+                <span className="text-[12px] font-mono text-fg flex-1 min-w-0 truncate">
+                  {r.to ? r.to : <span className="italic text-fg-subtle">{t('(vide)')}</span>}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => remove(i)}
+                  className="flex-shrink-0 flex items-center justify-center w-7 h-7 rounded-full text-fg-muted hover:text-stream hover:bg-stream/15 transition-colors"
+                  aria-label={
+                    concealed
+                      ? t('Retirer le remplacement masqué')
+                      : t('Retirer {text}', { text: r.from })
+                  }
+                >
+                  <X size={12} />
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="flex justify-end items-center gap-2 px-4 py-2 border-t border-border bg-bg/50">
+            <span className="text-[11px] text-fg-muted flex-1">
+              {replacements.length > 1
+                ? t('{n} remplacements actifs', { n: replacements.length })
+                : t('{n} remplacement actif', { n: replacements.length })}
+            </span>
+            <button
+              type="button"
+              onClick={() => void clear()}
+              className="inline-flex items-center gap-1.5 px-3 h-8 rounded-lg text-[12px] text-fg-muted hover:text-stream hover:bg-stream/10 transition-colors"
+            >
+              <Trash2 size={12} />
+              {t('Tout effacer')}
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

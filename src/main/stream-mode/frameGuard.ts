@@ -125,7 +125,7 @@ export function isMaskingActive(config: StreamModeConfig): boolean {
     maskMacAddresses: config.maskMacAddresses,
     maskInternalHostnames: config.maskInternalHostnames,
   };
-  return config.enabled && hasAnyMask(flags, config.customMasks);
+  return config.enabled && hasAnyMask(flags, config.customMasks, config.customReplacements);
 }
 
 /** A frame with no real document yet: nothing to mask, and no leak to fear. */

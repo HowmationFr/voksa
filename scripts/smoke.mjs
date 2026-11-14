@@ -69,6 +69,10 @@
 //      active; the cover HOLDS (past the 6s timer of a navigation curtain, and
 //      over a tab opened meanwhile) until the second call, which lifts it but
 //      leaves the stream armed on purpose.
+//  22b. LOCAL FILE IN A TAB: a path typed in the address bar opens the file
+//      (an image) over file://, it renders, and under Stream Mode the address
+//      bar and the rest of the chrome UI keep the file's name only, never its
+//      folders (which name the user).
 //  23. CAPTURE HANDSHAKE: driving the chrome-UI picker path (debug seam)
 //      raises OUR picker, picking a Voksa source arms Stream Mode before the
 //      source is delivered, and the delivered id is the one picked.
@@ -114,7 +118,7 @@ import http from 'node:http';
 import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import selfsigned from 'selfsigned';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2335,6 +2339,95 @@ async function main() {
   await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
   await ui.evaluate(`window.voksa.tabs.close(${J(panicTabId)})`);
   pass('PANIC');
+
+  // --- 22b. LOCAL FILE IN A TAB ---------------------------------------------------
+  // A path typed in the address bar opens the file (an image here, the
+  // project's own icon). Two things nothing else exercises: the document
+  // really renders over file://, and under Stream Mode the address bar keeps
+  // the file's NAME only. The folders of a local path are personal (on
+  // Windows and macOS they start with the account name) and the address bar
+  // is on screen for the whole stream.
+  const localPath = path.join(root, 'resources', 'icon.png');
+  const localUrl = pathToFileURL(localPath).href;
+  const localDir = localUrl.slice(0, localUrl.lastIndexOf('/') + 1);
+  const localTabId = await ui.evaluate(`window.voksa.tabs.create("voksa://newtab")`);
+  await ui.evaluate(`window.voksa.tabs.navigate(${J(localTabId)}, ${J(localPath)})`);
+  let localTab = null;
+  await waitFor(
+    'the typed path opened as a file: URL',
+    async () => {
+      localTab = (await ui.evaluate(`window.voksa.tabs.list()`)).find((t) => t.id === localTabId);
+      return localTab?.url === localUrl && localTab.isLoading === false;
+    },
+    STEP_TIMEOUT_MS,
+    `a local path typed in the address bar must load ${localUrl} (path syntax of normalizeInput, ` +
+      `localPathToFileUrl); the tab is at ${JSON.stringify(localTab?.url)}`,
+  );
+  const localPage = await connectPageTarget(
+    localUrl,
+    'local image tab',
+    'the tab of a local file exposes no page target: the file did not load',
+  );
+  const localImageExpr = `({ type: document.contentType,
+    width: document.images[0] ? document.images[0].naturalWidth : 0 })`;
+  const localImage = await localPage.evaluate(localImageExpr);
+  if (localImage.type !== 'image/png' || !(localImage.width > 0)) {
+    throw new Error(
+      `the local image did not render over file:// (${JSON.stringify(localImage)}): ` +
+        'opening a file from the PC is the feature',
+    );
+  }
+  await waitFor(
+    'the address bar shows the whole file URL with Stream Mode off',
+    async () => (await addressValue()) === localUrl,
+    STEP_TIMEOUT_MS,
+  );
+  // Anything in the chrome UI that spells the file's folder, as a URL or as
+  // a path: text, field values, tooltips.
+  const localDirShownExpr = `(() => {
+      const needles = ${J([
+        localDir,
+        path.dirname(localPath),
+        path.dirname(localPath).replace(/\\/g, '/'),
+      ])};
+      const texts = [document.body.innerText, document.title];
+      for (const el of document.querySelectorAll('input, textarea')) texts.push(el.value);
+      for (const el of document.querySelectorAll('[title]')) texts.push(el.getAttribute('title'));
+      return texts.find((text) => typeof text === 'string' && needles.some((n) => text.includes(n))) ?? null;
+    })()`;
+  // The probe must see the folder while nothing masks it, or its silence
+  // under Stream Mode below would prove nothing.
+  if ((await ui.evaluate(localDirShownExpr)) === null) {
+    throw new Error('the folder probe sees nothing with Stream Mode off: it cannot vouch for Stream Mode');
+  }
+  await ui.evaluate(`window.voksa.stream.update({ enabled: true })`);
+  await waitFor(
+    'the address bar keeps only the file name under Stream Mode',
+    async () => (await addressValue()) === 'file:///.../icon.png',
+    STREAM_TIMEOUT_MS,
+    'a local path reached the address bar unmasked under Stream Mode: its folders name the user ' +
+      '(redactFileUrl in shared/maskPatterns.ts)',
+  );
+  // Not just the bar: nowhere in the chrome UI (tab strip, tooltips).
+  const localPathShown = await ui.evaluate(localDirShownExpr);
+  if (localPathShown !== null) {
+    throw new Error(
+      `the folder of a local file is readable in the chrome UI under Stream Mode: ${JSON.stringify(String(localPathShown).slice(0, 200))}`,
+    );
+  }
+  // An image has no text to mask: it must stay visible, with no curtain left.
+  await waitFor(
+    'no curtain left over the local image',
+    async () => !(await ui.evaluate(CURTAIN_UP_EXPR)),
+    STREAM_TIMEOUT_MS,
+  );
+  const localImageStreamed = await localPage.evaluate(localImageExpr);
+  if (!(localImageStreamed.width > 0)) {
+    throw new Error(`the local image is gone under Stream Mode: ${JSON.stringify(localImageStreamed)}`);
+  }
+  await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  await ui.evaluate(`window.voksa.tabs.close(${J(localTabId)})`);
+  pass('LOCAL FILE IN A TAB');
 
   // --- 23. CAPTURE HANDSHAKE ------------------------------------------------------
   // The debug seam (voksa.capture.simulate) drives the chrome-UI picker path

@@ -1,0 +1,126 @@
+# Major versions of everything but Electron, one at a time.
+#
+# Dependabot keeps patch and minor versions current and deliberately ignores
+# majors (see dependabot.yml): a major usually needs code changes. Left alone
+# they pile up (React, Tailwind, TypeScript, ESLint...) until the day one of
+# them is needed for a security fix and the jump is several majors wide.
+#
+# Once a week this picks ONE dependency that has a newer major
+# (scripts/outdated-majors.mjs lists them, shipped dependencies first) and
+# hands it to agent-upgrade.yml: Claude upgrades it and whatever must move
+# with it, following .github/automation/dependency-major-upgrade.md, and the
+# pull request merges on its own once CI is green, unless something calls for
+# a person (agent-upgrade.yml lists what does).
+#
+# One at a time, on purpose: every upgrade rewrites package-lock.json, so two
+# open at once would conflict, and a regression is easier to trace to one
+# change. A dependency is attempted once per major: if its pull request was
+# closed without merging, that is a "no" and it is not proposed again (use the
+# manual trigger with `retry` to insist).
+#
+# Electron has its own workflow (electron-major.yml), which runs earlier in
+# the week and has priority.
+name: Dependency major upgrades
+
+on:
+  schedule:
+    - cron: '41 6 * * 3'
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Dependency to upgrade (default, the first one with a newer major)
+        type: string
+        required: false
+      retry:
+        description: Attempt it again even if a branch or pull request already exists for that major
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-majors
+  cancel-in-progress: false
+
+jobs:
+  pick:
+    name: Which dependency is next?
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      package: ${{ steps.pick.outputs.package }}
+      from: ${{ steps.pick.outputs.from }}
+      to: ${{ steps.pick.outputs.to }}
+      branch: ${{ steps.pick.outputs.branch }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Pick the next dependency
+        id: pick
+        env:
+          WANTED: ${{ inputs.package }}
+          RETRY: ${{ inputs.retry }}
+        run: |
+          # An upgrade already waiting (held for a person, or still running
+          # its CI) comes first: never two open at once.
+          open="$(gh pr list --state open --json headRefName --jq '[.[] | select(.headRefName | startswith("automation/"))] | length')"
+          if [ "$open" -gt 0 ] && [ "$RETRY" != "true" ]; then
+            echo "An automated upgrade pull request is still open: nothing new this week." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          node scripts/outdated-majors.mjs > "$RUNNER_TEMP/candidates.tsv"
+          echo "Dependencies with a newer major:" >> "$GITHUB_STEP_SUMMARY"
+          sed 's/^/- /; s/\t/ /g' "$RUNNER_TEMP/candidates.tsv" >> "$GITHUB_STEP_SUMMARY"
+
+          while IFS="$(printf '\t')" read -r name from to latest; do
+            [ -n "$name" ] || continue
+            if [ -n "$WANTED" ] && [ "$name" != "$WANTED" ]; then continue; fi
+            # Branch names cannot hold "@" or "/" comfortably: @scope/name
+            # becomes scope-name.
+            slug="$(printf '%s' "$name" | sed 's/^@//; s/[^A-Za-z0-9._-]/-/g')"
+            branch="automation/upgrade-${slug}-${to}"
+            attempts="$(gh pr list --head "$branch" --state all --json number --jq length)"
+            if git ls-remote --exit-code --heads origin "$branch" > /dev/null 2>&1; then attempts=$((attempts + 1)); fi
+            if [ "$attempts" -gt 0 ] && [ "$RETRY" != "true" ]; then
+              echo "$name $to was already attempted ($branch): skipped."
+              continue
+            fi
+            {
+              echo "package=$name"
+              echo "from=$from"
+              echo "to=$to"
+              echo "branch=$branch"
+            } >> "$GITHUB_OUTPUT"
+            echo "Next: $name $from → $to ($latest)." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          done < "$RUNNER_TEMP/candidates.tsv"
+          echo "No dependency to upgrade this week." | tee -a "$GITHUB_STEP_SUMMARY"
+
+  upgrade:
+    name: Upgrade it
+    needs: pick
+    if: needs.pick.outputs.package != ''
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      id-token: write
+    uses: ./.github/workflows/agent-upgrade.yml
+    with:
+      package: ${{ needs.pick.outputs.package }}
+      from: ${{ needs.pick.outputs.from }}
+      to: ${{ needs.pick.outputs.to }}
+      branch: ${{ needs.pick.outputs.branch }}
+      playbook: .github/automation/dependency-major-upgrade.md
+      # No scripted bump: a dependency rarely moves alone (react-dom with
+      # react, the matching @types package, a plugin with its host), and
+      # choosing what moves with it is part of the agent's work.
+    secrets: inherit

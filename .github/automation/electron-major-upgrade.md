@@ -1,39 +1,18 @@
 # Playbook: upgrading Voksa to a new Electron major
 
-You are run by `.github/workflows/electron-major.yml`, unattended, on a GitHub
-runner. Nobody is there to answer questions. The workflow has already created
-the branch, bumped `electron` in `package.json` / `package-lock.json` and
-installed it. Your job is the part that needs judgment: find out what the new
-major breaks in THIS codebase, adapt the code, prove what you can, and write
-down honestly what you could not.
+**Read [`upgrade-rules.md`](upgrade-rules.md) first.** It holds the rules
+common to every automated upgrade: what you must not do, the checks to run,
+and the report whose first line decides whether your work merges unattended.
+This page only adds what is specific to Electron.
 
-A maintainer reviews the pull request afterwards. It is never merged
-automatically. Your report is what they read first: an accurate "this fails
-and here is why" is worth more to them than a green result they cannot trust.
+The workflow has already bumped `electron` in `package.json` and
+`package-lock.json` and installed it.
 
-## What you must not do
-
-- **No git writes.** Do not commit, push, create branches or open pull
-  requests: the workflow does all of that after you finish.
-- **Do not edit `.github/workflows/`.** The token that pushes your work cannot
-  update workflow files, so the push would be rejected. If a workflow needs a
-  change, say exactly what in the report (see "Workflow changes needed").
-- **Do not weaken a test to make it pass.** No deleting, skipping, loosening
-  an assertion or raising a timeout to get to green. A test that fails because
-  the behaviour really changed is a finding: fix the code, or explain in the
-  report why the expectation itself is now wrong and change it deliberately.
-- **Do not bump `electron-chrome-extensions` or `electron-chrome-web-store`.**
-  Both are pinned and patched (`patches/`, applied by `patch-package
-  --error-on-fail`). If a patch no longer applies or the libraries do not work
-  with the new Electron, stop there and report it: porting those patches is a
-  human decision.
-- **Do not change other dependency versions** unless the upgrade strictly
-  requires it (a tool that refuses the new Electron). Say which and why.
-- **Do not trade the Stream Mode guarantee for a passing build.** When Stream
-  Mode is on, nothing sensitive may be painted, not for one frame. Any change
-  under `src/main/stream-mode/`, `src/injected/` or `src/preload/page.ts` must
-  keep that property; if you are not sure it does, do not make the change and
-  report the question instead.
+Electron is not a dependency like the others: it IS the browser. A new major
+brings a new Chromium and a new Node.js, and Voksa's promise (nothing
+sensitive painted while Stream Mode is on) rests on Chromium behaviours that
+do change between majors. Be slower here than anywhere else, and prefer a
+`hold` verdict to a guess.
 
 ## How to work
 
@@ -44,29 +23,12 @@ and here is why" is worth more to them than a green result they cannot trust.
    versions each major ships, and any operating system it stops supporting.
 2. **Map each change onto the code.** Search `src/main`, `src/preload`,
    `src/injected`, `scripts` and the config files for every API, event,
-   default or behaviour the notes mention. "Not used here" is a valid answer;
-   write it down so the reviewer knows it was checked.
+   default or behaviour the notes mention.
 3. **Go through the places that have bitten this project before** (below).
-4. **Adapt the code**, following the project rules in `CONTRIBUTING.md`: the
-   IPC golden rule, user-facing strings through the i18n layer with a French
-   key and an English entry, no hard-coded colours, focused changes.
-5. **Run the checks, in this order, and fix what they show:**
-
-   ```bash
-   npm run typecheck
-   npm run lint
-   npm test
-   npm run build
-   xvfb-run -a node scripts/smoke.mjs
-   ```
-
-   The smoke suite needs the build, takes a few minutes and drives a real
-   browser; one of its popup scenarios is occasionally flaky, so a failure
-   there deserves one re-run before you conclude anything. Other failures are
-   real until proven otherwise.
-6. **Regenerate what is generated:** `npm run gen:credits` (the licence page
-   lists Electron and what it bundles).
-7. **Write the report** (format below), then stop.
+4. **Move `@types/node` with the bundled Node.js**, not with the latest Node:
+   its major should match the Node.js major the new Electron ships.
+5. **Adapt the code, run the checks, write the report**, as the common rules
+   say.
 
 ## Where Electron upgrades have bitten this project
 
@@ -94,31 +56,13 @@ and here is why" is worth more to them than a green result they cannot trust.
   them if something requires it.
 - **Minimum OS versions.** `release.yml` stamps a minimum macOS (Darwin)
   version into the update feed, and `README.md` states the supported systems.
-  If the new Chromium drops an OS version, the README is yours to update; the
-  workflow change goes in the report.
+  If the new Chromium drops an OS version, the README is yours to update, but
+  the workflow is not: that makes this upgrade a `hold`, with the exact edit
+  `release.yml` needs written in the report. Shipping without it would update
+  users on the dropped system into an application that no longer starts.
 
-## The report
+## In the report, also
 
-Write it to `ELECTRON_UPGRADE_REPORT.md` at the repository root (the workflow
-moves it into the pull request description; it is not committed). Plain
-Markdown, in English, with exactly these sections:
-
-1. **Summary**: two or three sentences. Does it build, do the checks pass, and
-   what is the one thing the reviewer must look at.
-2. **Breaking changes reviewed**: one line per change, grouped by major:
-   what it is, whether it applies here, and where you handled it.
-3. **Code changes**: each file you touched and why.
-4. **Checks**: every command you ran with its real outcome. If something
-   failed and you could not fix it, the failing output and your best
-   understanding of the cause.
-5. **Not verified**: what this run could not exercise. Always list at least:
-   the smoke suite on Windows and macOS (CI on the pull request runs it), the
-   packaged applications, Google sign-in done by hand, installing an extension
-   from the Chrome Web Store, and updating from the previous release.
-6. **Needs a human decision**: anything you chose not to do, and why.
-7. **Workflow changes needed**: exact edits to files under
-   `.github/workflows/`, or "none".
-
-Never write that something works unless you ran it in this session and saw
-it pass. "Not run" and "failed" are acceptable answers; a wrong "passed" is
-not.
+Under **Not verified**, always add what only a person can try: Google sign-in
+done by hand, installing an extension from the Chrome Web Store, and updating
+from the previous release.

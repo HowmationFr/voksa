@@ -24,6 +24,12 @@
 # (GitHub's loop protection), so neither CI nor release.yml would ever start,
 # and the "release tags" ruleset only lets a repository role create v* tags.
 #
+# Releases are spaced: at most one every 4 days, so users are not handed an
+# update every other day (Electron alone publishes a patch every two or three
+# days). What merges in between ships together in the next one. The repository
+# VARIABLE AUTO_RELEASE_MIN_DAYS changes the number; running this workflow by
+# hand releases now, whatever the spacing.
+#
 # Pause it without touching this file: set the repository VARIABLE
 # AUTO_RELEASE to "off" (Settings > Secrets and variables > Actions).
 name: Auto release
@@ -74,7 +80,14 @@ jobs:
           node-version: 22
       - name: Is a release due?
         id: due
-        run: node scripts/release-due.mjs ${{ inputs.force && '--force' || '' }}
+        env:
+          # Spacing applies to the daily schedule only. A manual run is a
+          # person asking for a release now (an urgent fix): no waiting.
+          RELEASE_MIN_DAYS: ${{ github.event_name == 'schedule' && (vars.AUTO_RELEASE_MIN_DAYS || '4') || '0' }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ "$FORCE" = "true" ]; then set -- --force; fi
+          node scripts/release-due.mjs "$@"
 
       # Commits carry the identity of the token's owner (their GitHub noreply
       # address, nothing private): the release history stays in the

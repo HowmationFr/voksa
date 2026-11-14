@@ -8,12 +8,20 @@
 #     drives a real browser on three OSes and is occasionally flaky; a retry
 #     settles most of those, and auto-merge then proceeds as usual.
 #   - still red after the retry: open ONE issue naming the pull request, so
-#     the maintainer is told instead of finding out a week later.
+#     the maintainer is told, AND have it repaired: agent-upgrade.yml applies
+#     the update on a branch of its own, Claude finds what it breaks and fixes
+#     the code (.github/automation/dependabot-fix.md), the checks are re-run,
+#     and the repair comes as a pull request that merges on its own once CI is
+#     green. Being told without anything happening only moved the wait.
 #
-# Deliberately NO agent here: a fix written by an LLM and pushed onto a branch
-# that auto-merges, then auto-releases, would reach users with no human having
-# read it. A real breakage is for a person (who can ask @claude in the pull
-# request, see claude.yml).
+# The repair goes through the same gate as a major upgrade (agent-upgrade.yml
+# lists what holds it for a person), is attempted ONCE per Dependabot pull
+# request, and only for npm updates: an update of a GitHub Action changes
+# workflow files, which the automation token cannot push. Once the repair is
+# merged, Dependabot closes its own pull request (nothing left to update).
+#
+# Switch the repairs off without touching this file: set the repository
+# VARIABLE DEPENDABOT_REPAIR to "off". The retry and the issue stay.
 name: Dependabot CI retry
 
 on:
@@ -23,23 +31,33 @@ on:
 
 permissions:
   actions: write
+  contents: read
   issues: write
   pull-requests: read
 
 jobs:
   retry:
-    name: Retry once, then tell the maintainer
+    name: Retry once, then report and ask for a repair
     if: >-
       github.event.workflow_run.conclusion == 'failure' &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.actor.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
+    outputs:
+      repair: ${{ steps.report.outputs.repair }}
+      pr: ${{ steps.report.outputs.pr }}
+      head: ${{ steps.report.outputs.head }}
+      branch: ${{ steps.report.outputs.branch }}
+      issue: ${{ steps.report.outputs.issue }}
+      title: ${{ steps.report.outputs.title }}
     env:
       GH_TOKEN: ${{ github.token }}
       RUN_ID: ${{ github.event.workflow_run.id }}
       RUN_URL: ${{ github.event.workflow_run.html_url }}
       ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
       PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      REPAIR: ${{ vars.DEPENDABOT_REPAIR }}
     steps:
       - name: First failure, re-run the failed jobs
         if: github.event.workflow_run.run_attempt == 1
@@ -47,27 +65,101 @@ jobs:
           gh run rerun "$RUN_ID" --failed -R "$GITHUB_REPOSITORY"
           echo "Re-running the failed jobs of run $RUN_ID (attempt 1 failed)." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Still red, open an issue (once per pull request)
+      - name: Still red, tell the maintainer and decide on a repair
+        id: report
         if: github.event.workflow_run.run_attempt > 1
         run: |
           if [ -z "$PR" ]; then
             echo "No pull request attached to run $RUN_ID: nothing to report."
             exit 0
           fi
-          title="CI is red on Dependabot pull request #${PR}"
-          existing="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')"
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" -R "$GITHUB_REPOSITORY" \
-              --body "Still failing after another run (attempt ${ATTEMPT}): ${RUN_URL}"
-            exit 0
-          fi
           pr_title="$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json title --jq .title)"
+
+          # --- Can it be repaired without a person? -------------------------
+          branch="automation/fix-dependabot-${PR}"
+          repair=no
+          case "$HEAD_BRANCH" in
+            dependabot/npm_and_yarn/*) repair=yes ;;
+            *) why="it is not an npm update, and the agent cannot push changes to workflow files" ;;
+          esac
+          if [ "$REPAIR" = "off" ]; then
+            repair=no
+            why="repairs are switched off (repository variable \`DEPENDABOT_REPAIR\`)"
+          fi
+          if [ "$repair" = yes ]; then
+            # Once per pull request: a branch or a pull request (open, merged
+            # or closed) means it was tried, or declined.
+            attempts="$(gh pr list -R "$GITHUB_REPOSITORY" --head "$branch" --state all --json number --jq length)"
+            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --silent 2> /dev/null; then
+              attempts=$((attempts + 1))
+            fi
+            if [ "$attempts" -gt 0 ]; then
+              repair=no
+              why="a repair was already attempted (\`${branch}\`)"
+            fi
+          fi
+
+          # --- One issue per pull request ----------------------------------
+          title="CI is red on Dependabot pull request #${PR}"
+          issue="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')"
+          if [ "$repair" = yes ]; then
+            next="What happens next: Claude repairs it on the branch \`${branch}\` (\`.github/automation/dependabot-fix.md\`). The repair comes as its own pull request, which merges on its own once CI is green unless something calls for you; a comment here will say which, and this issue closes when it merges."
+          else
+            next="Nobody repairs this one automatically: ${why}. What usually works: read the failed job, fix it on the pull request's branch, or comment \`@dependabot recreate\` once \`main\` is fixed. Close this issue when the pull request is merged or superseded."
+          fi
+          if [ -n "$issue" ]; then
+            {
+              echo "Still failing after another run (attempt ${ATTEMPT}): ${RUN_URL}"
+              echo
+              echo "$next"
+            } > "$RUNNER_TEMP/comment.md"
+            gh issue comment "$issue" -R "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/comment.md"
+          else
+            {
+              echo "@${GITHUB_REPOSITORY_OWNER} CI failed twice in a row on #${PR} (\`${pr_title}\`), so it will not merge on its own."
+              echo
+              echo "- Failed run: ${RUN_URL}"
+              echo "- If it is an Electron bump, users stay on the previous Chromium until this is sorted out."
+              echo
+              echo "$next"
+            } > "$RUNNER_TEMP/issue.md"
+            url="$(gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body-file "$RUNNER_TEMP/issue.md")"
+            issue="${url##*/}"
+          fi
+
           {
-            echo "@${GITHUB_REPOSITORY_OWNER} CI failed twice in a row on #${PR} (\`${pr_title}\`), so it will not merge on its own."
-            echo
-            echo "- Failed run: ${RUN_URL}"
-            echo "- If it is an Electron bump, users stay on the previous Chromium until this is sorted out."
-            echo
-            echo "What usually works: read the failed job, fix it on the pull request's branch, or comment \`@dependabot recreate\` once \`main\` is fixed. Close this issue when the pull request is merged or superseded."
-          } > "$RUNNER_TEMP/issue.md"
-          gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body-file "$RUNNER_TEMP/issue.md"
+            echo "repair=$repair"
+            echo "pr=$PR"
+            echo "head=$HEAD_BRANCH"
+            echo "branch=$branch"
+            echo "issue=$issue"
+            echo "title=$pr_title"
+          } >> "$GITHUB_OUTPUT"
+          echo "Issue #$issue. Repair by the agent: $repair${why:+ ($why)}." | tee -a "$GITHUB_STEP_SUMMARY"
+
+  repair:
+    name: Have Claude repair the update
+    needs: retry
+    if: needs.retry.outputs.repair == 'yes'
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      id-token: write
+    concurrency:
+      group: dependabot-repair
+      cancel-in-progress: false
+    uses: ./.github/workflows/agent-upgrade.yml
+    with:
+      # A label here: what is repaired is whatever the pull request updates.
+      package: ${{ needs.retry.outputs.title }}
+      branch: ${{ needs.retry.outputs.branch }}
+      merge_ref: ${{ needs.retry.outputs.head }}
+      playbook: .github/automation/dependabot-fix.md
+      title: "fix(deps): make the Dependabot update of #${{ needs.retry.outputs.pr }} pass"
+      task: >-
+        CI failed twice in a row on Dependabot pull request #${{ needs.retry.outputs.pr }}
+        ("${{ needs.retry.outputs.title }}"). That update is already applied to your working
+        tree, uncommitted. Make this repository pass with it.
+      issue: ${{ needs.retry.outputs.issue }}
+    secrets: inherit

@@ -47,17 +47,17 @@ on:
   workflow_call:
     inputs:
       package:
-        description: npm package to upgrade
+        description: npm package to upgrade (for a repair, a label of what is repaired)
         type: string
         required: true
       from:
-        description: Its current major
+        description: Its current major (empty for a repair)
         type: string
-        required: true
+        default: ''
       to:
-        description: The major to upgrade to
+        description: The major to upgrade to (empty for a repair, nothing to check then)
         type: string
-        required: true
+        default: ''
       branch:
         description: Branch to prepare the upgrade on
         type: string
@@ -71,7 +71,21 @@ on:
         type: string
         default: ''
       issue:
-        description: Tracking issue to report to (optional)
+        description: Tracking issue to report to, closed when the pull request merges (optional)
+        type: string
+        default: ''
+      merge_ref:
+        description: >-
+          Branch whose changes are applied before the agent starts, uncommitted
+          (a Dependabot branch whose update must be made to pass). Empty for an upgrade.
+        type: string
+        default: ''
+      title:
+        description: Title of the commit and of the pull request (default, "chore(deps) upgrade X from A to B")
+        type: string
+        default: ''
+      task:
+        description: First sentence of the agent's instructions (default, the major upgrade of `package`)
         type: string
         default: ''
     secrets:
@@ -85,7 +99,7 @@ permissions:
 
 jobs:
   upgrade:
-    name: Upgrade ${{ inputs.package }} ${{ inputs.from }} → ${{ inputs.to }}
+    name: ${{ inputs.title || format('Upgrade {0} {1} → {2}', inputs.package, inputs.from, inputs.to) }}
     runs-on: ubuntu-latest
     # A major upgrade is a long session; the cap only stops a runaway.
     timeout-minutes: 300
@@ -102,6 +116,8 @@ jobs:
       BRANCH: ${{ inputs.branch }}
       PLAYBOOK: ${{ inputs.playbook }}
       ISSUE: ${{ inputs.issue }}
+      MERGE_REF: ${{ inputs.merge_ref }}
+      TITLE: "${{ inputs.title || format('chore(deps): upgrade {0} from {1} to {2}', inputs.package, inputs.from, inputs.to) }}"
     steps:
       - name: Both secrets must be configured
         env:
@@ -117,6 +133,9 @@ jobs:
           # Nothing left in the git config for the agent to find: the push at
           # the end brings its own credentials.
           persist-credentials: false
+          # A repair needs the branch it repairs: every branch is fetched
+          # then, here, while the checkout still has its credentials.
+          fetch-depth: ${{ inputs.merge_ref != '' && '0' || '1' }}
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -136,6 +155,18 @@ jobs:
           before="$(node -p "try { require(process.argv[1]).numPassedTests } catch { '' }" "$RUNNER_TEMP/tests-before.json")"
           echo "tests=$before" >> "$GITHUB_OUTPUT"
           echo "Unit tests passing before the upgrade: ${before:-unknown}"
+          # A repair: the update that does not pass is applied on top of
+          # main, AFTER the count above (taken on code that passes), and left
+          # uncommitted, so the pull request made at the end carries the
+          # update and its fix in one commit. Squash: no merge commit, hence
+          # no identity needed here.
+          if [ -n "$MERGE_REF" ]; then
+            if ! git merge --squash --no-commit "origin/$MERGE_REF"; then
+              echo "::error::$MERGE_REF does not apply on main any more. Dependabot will rebase it; its next red run starts the repair again."
+              exit 1
+            fi
+            npm ci
+          fi
           if [ -n "$INSTALL" ]; then bash -c "$INSTALL"; fi
       # Same reason as in ci.yml: the smoke suite must run with Electron's
       # real sandbox, which Ubuntu's AppArmor default forbids.
@@ -154,7 +185,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            Upgrade the npm package `${{ inputs.package }}` from major ${{ inputs.from }} to major ${{ inputs.to }} in this repository.
+            ${{ inputs.task || format('Upgrade the npm package `{0}` from major {1} to major {2} in this repository.', inputs.package, inputs.from, inputs.to) }}
             Before anything else, read ${{ inputs.playbook }} and follow it to the letter: it says what to check, which commands to run, what you must not touch, and where to write your report.
             Nobody reviews this before it ships: if the checks pass and your report starts with "Verdict: ready", the change is merged and released to users automatically. Say "Verdict: hold" whenever you are not sure.
           # acceptEdits + an explicit list: what is not listed is refused (the
@@ -189,7 +220,8 @@ jobs:
             echo "installed: $installed"
             [ "${installed%%.*}" = "$TO" ]
           }
-          check "$PACKAGE is at major $TO" at_target
+          # A repair has no target major: the update is whatever Dependabot made.
+          if [ -n "$TO" ]; then check "$PACKAGE is at major $TO" at_target; fi
           check "npm run typecheck" npm run typecheck
           check "npm run lint" npm run lint
           check "npm test" npm test
@@ -308,7 +340,7 @@ jobs:
             if [ "$auto_merge" != "false" ]; then gh pr merge "$number" --disable-auto; fi
           fi
 
-          title="chore(deps): upgrade ${PACKAGE} from ${FROM} to ${TO}"
+          title="$TITLE"
           git commit -m "$title"
           # Explicit URL and no inherited auth header: whatever checkout or
           # the action left in the git config, this push is the token's, so
@@ -317,7 +349,9 @@ jobs:
             "https://x-access-token:${AUTOMATION_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${BRANCH}"
 
           {
-            echo "\`${PACKAGE}\` **${FROM} → ${TO}**, prepared by the upgrade agent (\`.github/workflows/agent-upgrade.yml\`)."
+            echo "**${TITLE}**, prepared by the upgrade agent (\`.github/workflows/agent-upgrade.yml\`)."
+            # Merging this is what the tracking issue was waiting for.
+            if [ -n "$ISSUE" ]; then echo; echo "Closes #${ISSUE}"; fi
             echo
             if [ -n "$hold" ]; then
               echo "> **Held for a person.** It will not merge on its own, because:"

@@ -15,7 +15,13 @@ jobs:
     # Not on Dependabot's pull requests (GitHub gives them no access to the
     # token: the job would only fail) nor on release pull requests (a version
     # bump has nothing to review, and each review draws on the subscription).
-    if: github.actor != 'dependabot[bot]' && !startsWith(github.head_ref, 'release/')
+    # Not on a pull request from a fork either: secrets are not handed to
+    # those runs, so the review could only fail and leave a red check on a
+    # contributor's first pull request.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      !startsWith(github.head_ref, 'release/') &&
+      github.event.pull_request.head.repo.full_name == github.repository
     # Optional: Filter by PR author
     # if: |
     #   github.event.pull_request.user.login == 'external-contributor' ||

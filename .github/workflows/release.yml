@@ -1,8 +1,15 @@
 # Release: pushing a vX.Y.Z tag builds the Windows, macOS (signed and
 # notarized) and Linux artifacts and uploads them into a DRAFT GitHub
 # release. Nothing reaches users (neither the releases page nor the
-# auto-updater) until a maintainer clicks "Publish release": that click is
-# the manual gate.
+# auto-updater) while it is a draft.
+#
+# Who publishes it depends on who cut it:
+#  - a release tagged by hand stops at the draft: a maintainer clicks
+#    "Publish release". That click is the manual gate.
+#  - an AUTOMATIC patch release (auto-release.yml, recognisable by the [auto]
+#    marker of its release commit) is published by the last job below, once
+#    the draft has been verified. That is the point of it: a security fix
+#    that waits for a click is a fix users do not have.
 name: Release
 
 on:
@@ -19,6 +26,8 @@ jobs:
   guard:
     name: Guard (tag = version, commit on main)
     runs-on: ubuntu-latest
+    outputs:
+      auto: ${{ steps.kind.outputs.auto }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -41,6 +50,20 @@ jobs:
       - name: Repository field must be set
         run: |
           node -e "const r = String(require('./package.json').repository ?? ''); if (!r || r.includes('VOTRE-COMPTE-GITHUB')) { console.error('package.json repository still contains the placeholder'); process.exit(1); }"
+      # auto-release.yml titles its release commit "chore(release): X.Y.Z
+      # [auto]". Anchored on the whole shape, so a hand-written subject that
+      # merely mentions [auto] does not publish itself.
+      - name: Automatic or manual release?
+        id: kind
+        run: |
+          subject="$(git log -1 --format=%s "$GITHUB_SHA")"
+          if printf '%s' "$subject" | grep -Eq '^chore\(release\): [0-9]+\.[0-9]+\.[0-9]+ \[auto\]( \(#[0-9]+\))?$'; then
+            echo "auto=true" >> "$GITHUB_OUTPUT"
+            echo "Automatic release ($subject): it will be published once verified."
+          else
+            echo "auto=false" >> "$GITHUB_OUTPUT"
+            echo "Manual release ($subject): it stops at the draft."
+          fi
 
   draft:
     name: Create the draft release
@@ -166,3 +189,22 @@ jobs:
           gh release upload "$TAG" -R "${GITHUB_REPOSITORY}" "$f" --clobber
           gh release download "$TAG" -R "${GITHUB_REPOSITORY}" -p latest-mac.yml -O - | grep -qx "minimumSystemVersion: ${MIN_DARWIN}" \
             || { echo "::error::latest-mac.yml on the draft does not carry minimumSystemVersion ${MIN_DARWIN}: macOS 12 installs would auto-update into a build that cannot launch."; exit 1; }
+
+  # Automatic releases only (see the header): the click a maintainer gives a
+  # manual release. After `verify`, never before: a draft with a missing
+  # artifact or a wrong latest-mac.yml must not reach the auto-updater. A
+  # failure anywhere above leaves the draft unpublished and this job skipped;
+  # GitHub mails the failed run.
+  publish:
+    name: Publish (automatic releases only)
+    needs: [guard, verify]
+    if: needs.guard.outputs.auto == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the verified draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release edit "$TAG" -R "${GITHUB_REPOSITORY}" --draft=false --latest
+          echo "Published $TAG: installed copies update themselves from here." >> "$GITHUB_STEP_SUMMARY"

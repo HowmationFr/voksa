@@ -1,0 +1,299 @@
+# New Electron major: be told, and get the upgrade prepared.
+#
+# Dependabot deliberately ignores major versions (see dependabot.yml), so
+# nothing used to say when a new Electron major came out. It matters beyond
+# convenience: Electron only maintains its most recent stable majors, and a
+# major that falls out of that window stops receiving Chromium security fixes.
+#
+# Once a week:
+#   1. `detect` compares the latest stable Electron with the one in
+#      package.json. A newer major opens ONE tracking issue (GitHub notifies
+#      the maintainer).
+#   2. `migrate` then prepares the upgrade: it bumps Electron on a branch,
+#      lets Claude adapt the code following .github/automation/
+#      electron-major-upgrade.md, re-runs the checks itself, and opens a pull
+#      request with the agent's report and the measured results.
+#
+# The pull request is NEVER merged automatically, and it is opened as a draft
+# when a check still fails: a major upgrade is reviewed by a person. The usual
+# CI runs on it on all three OSes.
+#
+# Division of labour, on purpose: the agent only edits files and runs the
+# project's commands. Branch, commit, push and pull request are plain workflow
+# steps, so they do not depend on what a model decides to do.
+#
+# Needs two secrets (see .github/AUTOMATION.md): CLAUDE_CODE_OAUTH_TOKEN (the
+# agent runs on the maintainer's Claude subscription) and AUTOMATION_TOKEN (a
+# pull request opened with the default GITHUB_TOKEN would not trigger CI).
+name: Electron major upgrade
+
+on:
+  schedule:
+    - cron: '41 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Electron major to upgrade to (default, the latest stable)
+        type: string
+        required: false
+      retry:
+        description: Prepare the upgrade again even if a branch or pull request already exists for it
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: electron-major
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Is a newer Electron major out?
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    outputs:
+      current: ${{ steps.versions.outputs.current }}
+      target: ${{ steps.versions.outputs.target }}
+      latest: ${{ steps.versions.outputs.latest }}
+      branch: ${{ steps.versions.outputs.branch }}
+      migrate: ${{ steps.plan.outputs.migrate }}
+      issue: ${{ steps.issue.outputs.number }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Compare the versions
+        id: versions
+        env:
+          WANTED: ${{ inputs.target }}
+        run: |
+          current="$(node -p "String(require('./package.json').devDependencies.electron).replace(/^[^0-9]*/, '').split('.')[0]")"
+          latest="$(npm view electron dist-tags.latest)"
+          target="${WANTED:-${latest%%.*}}"
+          case "$current$target" in
+            *[!0-9]*|'') echo "::error::Could not read the Electron majors (current='$current', target='$target')."; exit 1 ;;
+          esac
+          {
+            echo "current=$current"
+            echo "latest=$latest"
+            echo "target=$target"
+            echo "branch=automation/electron-$target"
+          } >> "$GITHUB_OUTPUT"
+          echo "Voksa ships Electron $current; latest stable is $latest; target major is $target." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Open the tracking issue (once per major)
+        id: issue
+        if: fromJSON(steps.versions.outputs.target) > fromJSON(steps.versions.outputs.current)
+        env:
+          CURRENT: ${{ steps.versions.outputs.current }}
+          TARGET: ${{ steps.versions.outputs.target }}
+          LATEST: ${{ steps.versions.outputs.latest }}
+        run: |
+          title="Electron ${TARGET} is out (Voksa ships ${CURRENT})"
+          number="$(gh issue list --state all --search "in:title \"Electron ${TARGET} is out\"" --json number --jq '.[0].number // empty')"
+          if [ -z "$number" ]; then
+            {
+              echo "@${GITHUB_REPOSITORY_OWNER} Electron **${LATEST}** is the latest stable release; Voksa is on major **${CURRENT}**."
+              echo
+              echo "Why it matters: Electron only maintains its most recent stable majors ([support policy](https://www.electronjs.org/docs/latest/tutorial/electron-timelines)). Once ${CURRENT} leaves that window it stops receiving Chromium security fixes, and no patch release can bring them."
+              echo
+              echo "What happens next: \`.github/workflows/electron-major.yml\` prepares the upgrade on the branch \`automation/electron-${TARGET}\` and opens a pull request with a report. It is never merged automatically."
+              echo
+              echo "- [Breaking changes](https://www.electronjs.org/docs/latest/breaking-changes)"
+              echo "- [Release notes](https://releases.electronjs.org/release/v${LATEST})"
+            } > "$RUNNER_TEMP/issue.md"
+            url="$(gh issue create --title "$title" --body-file "$RUNNER_TEMP/issue.md")"
+            number="${url##*/}"
+            echo "Opened issue #$number." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Does the upgrade still have to be prepared?
+        id: plan
+        env:
+          CURRENT: ${{ steps.versions.outputs.current }}
+          TARGET: ${{ steps.versions.outputs.target }}
+          BRANCH: ${{ steps.versions.outputs.branch }}
+          RETRY: ${{ inputs.retry }}
+        run: |
+          migrate=false
+          if [ "$TARGET" -gt "$CURRENT" ]; then
+            # One attempt per major: a branch or a pull request (open, merged
+            # or closed) means it was already prepared, or deliberately
+            # declined. `retry` overrides that from the manual trigger.
+            attempts="$(gh pr list --head "$BRANCH" --state all --json number --jq length)"
+            if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null 2>&1; then attempts=$((attempts + 1)); fi
+            if [ "$attempts" -eq 0 ] || [ "$RETRY" = "true" ]; then migrate=true; fi
+          fi
+          echo "migrate=$migrate" >> "$GITHUB_OUTPUT"
+          echo "Prepare the upgrade now: $migrate" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  migrate:
+    name: Prepare the upgrade pull request
+    needs: detect
+    if: needs.detect.outputs.migrate == 'true'
+    runs-on: ubuntu-latest
+    # A major upgrade is a long session; the cap only stops a runaway.
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      issues: write
+      # The Claude action authenticates as its GitHub App through OIDC.
+      id-token: write
+    env:
+      CURRENT: ${{ needs.detect.outputs.current }}
+      TARGET: ${{ needs.detect.outputs.target }}
+      BRANCH: ${{ needs.detect.outputs.branch }}
+      ISSUE: ${{ needs.detect.outputs.issue }}
+    steps:
+      - name: Both secrets must be configured
+        env:
+          AUTOMATION_TOKEN: ${{ secrets.AUTOMATION_TOKEN }}
+          CLAUDE_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          missing=0
+          [ -n "$AUTOMATION_TOKEN" ] || { echo "::error::The AUTOMATION_TOKEN secret is missing (see .github/AUTOMATION.md)."; missing=1; }
+          [ -n "$CLAUDE_TOKEN" ] || { echo "::error::The CLAUDE_CODE_OAUTH_TOKEN secret is missing (see .github/AUTOMATION.md)."; missing=1; }
+          exit "$missing"
+      - uses: actions/checkout@v7
+        with:
+          # Nothing left in the git config for the agent to find: the push at
+          # the end brings its own credentials.
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Start the branch and bump Electron
+        run: |
+          git switch -c "$BRANCH"
+          npm ci
+          # Same caret range as today: patch and minor releases of the new
+          # major keep flowing through Dependabot afterwards.
+          npm install --save-dev "electron@^${TARGET}.0.0"
+      # Same reason as in ci.yml: the smoke suite must run with Electron's
+      # real sandbox, which Ubuntu's AppArmor default forbids.
+      - name: Allow unprivileged user namespaces (Electron sandbox)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # The judgment part. No model is pinned on purpose: a hard-coded model
+      # id is one more thing that goes stale; the action's default follows
+      # Claude Code's. continue-on-error: if the session dies (usage limit,
+      # outage), the bump and whatever was adapted still reach a draft pull
+      # request instead of being thrown away.
+      - name: Adapt the code (Claude, following the playbook)
+        id: agent
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Upgrade this repository from Electron ${{ needs.detect.outputs.current }} to Electron ${{ needs.detect.outputs.target }} (latest stable: ${{ needs.detect.outputs.latest }}).
+            The dependency is already bumped in package.json and package-lock.json and installed on this runner.
+            Before anything else, read .github/automation/electron-major-upgrade.md and follow it to the letter: it says what to check, which commands to run, what you must not touch, and where to write your report.
+          # acceptEdits + an explicit list: what is not listed is refused (the
+          # default mode lets a safety review wave other calls through). The
+          # web is limited to where Electron documents itself, so the agent
+          # reads release notes, not arbitrary pages.
+          claude_args: |
+            --max-turns 400
+            --permission-mode acceptEdits
+            --allowedTools "Read,Edit,MultiEdit,Write,Glob,Grep,LS,WebFetch(domain:www.electronjs.org),WebFetch(domain:releases.electronjs.org),WebFetch(domain:github.com),WebFetch(domain:raw.githubusercontent.com),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(xvfb-run:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+
+      # Measured by the workflow, not reported by the agent: the pull request
+      # says what actually passes on this runner.
+      - name: Re-run the checks
+        id: checks
+        run: |
+          failed=0
+          table="| Check (Linux runner) | Result |\n|---|---|\n"
+          check() {
+            name="$1"; shift
+            if "$@" > "$RUNNER_TEMP/check.log" 2>&1; then
+              table+="| \`$name\` | passed |\n"
+            else
+              table+="| \`$name\` | **FAILED** |\n"
+              failed=1
+              echo "::group::$name failed"; tail -n 60 "$RUNNER_TEMP/check.log"; echo "::endgroup::"
+            fi
+          }
+          check "npm run typecheck" npm run typecheck
+          check "npm run lint" npm run lint
+          check "npm test" npm test
+          check "npm run build" npm run build
+          check "node scripts/smoke.mjs" timeout 1200 xvfb-run -a node scripts/smoke.mjs
+          printf '%b' "$table" > "$RUNNER_TEMP/checks.md"
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+
+      - name: Commit, push and open the pull request
+        env:
+          # Only here, after the agent is done: the agent step never has
+          # this token in its environment.
+          AUTOMATION_TOKEN: ${{ secrets.AUTOMATION_TOKEN }}
+          GH_TOKEN: ${{ secrets.AUTOMATION_TOKEN }}
+          AGENT_OUTCOME: ${{ steps.agent.outcome }}
+          CHECKS_FAILED: ${{ steps.checks.outputs.failed }}
+        run: |
+          # The report is the pull request's description, not a file to ship.
+          report="$RUNNER_TEMP/report.md"
+          if [ -f ELECTRON_UPGRADE_REPORT.md ]; then mv ELECTRON_UPGRADE_REPORT.md "$report"; else echo "_The agent left no report._" > "$report"; fi
+
+          # In the maintainer's name (the token owner's GitHub noreply
+          # address), set here because the action above configures its own.
+          login="$(gh api user --jq .login)"
+          id="$(gh api user --jq .id)"
+          git config user.name "$login"
+          git config user.email "${id}+${login}@users.noreply.github.com"
+          git add -A
+          git commit -m "chore(deps-dev): upgrade electron from ${CURRENT} to ${TARGET}"
+          # Explicit URL and no inherited auth header: whatever checkout or
+          # the action left in the git config, this push is the token's, so
+          # CI runs on it. --force only matters for a `retry`.
+          git -c "http.https://github.com/.extraheader=" push --force \
+            "https://x-access-token:${AUTOMATION_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${BRANCH}"
+
+          {
+            echo "Electron **${CURRENT} → ${TARGET}**, prepared by \`.github/workflows/electron-major.yml\` for #${ISSUE}. Not merged automatically: this needs a review."
+            echo
+            if [ "$AGENT_OUTCOME" != "success" ]; then
+              echo "> The agent session did not finish cleanly (outcome: \`${AGENT_OUTCOME}\`). What it had done is here; treat it as incomplete. Re-run the workflow with \`retry\` to try again."
+              echo
+            fi
+            echo "## Checks re-run by the workflow after the agent"
+            echo
+            cat "$RUNNER_TEMP/checks.md"
+            echo
+            echo "CI on this pull request runs the same checks on Windows, macOS and Linux."
+            echo
+            echo "## Agent report"
+            echo
+            cat "$report"
+          } > "$RUNNER_TEMP/pr.md"
+
+          draft=""
+          if [ "$CHECKS_FAILED" != "0" ] || [ "$AGENT_OUTCOME" != "success" ]; then draft="--draft"; fi
+          number="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --body-file "$RUNNER_TEMP/pr.md"
+            url="$(gh pr view "$number" --json url --jq .url)"
+          else
+            url="$(gh pr create --base main --head "$BRANCH" $draft \
+              --title "chore(deps-dev): upgrade electron from ${CURRENT} to ${TARGET}" \
+              --body-file "$RUNNER_TEMP/pr.md")"
+          fi
+          echo "Pull request: $url" >> "$GITHUB_STEP_SUMMARY"
+          echo "url=$url" >> "$GITHUB_ENV"
+
+      - name: Link the pull request from the tracking issue
+        if: env.url != '' && env.ISSUE != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue comment "$ISSUE" -R "$GITHUB_REPOSITORY" --body "The upgrade is prepared in ${url}. It waits for a review; nothing merges on its own."

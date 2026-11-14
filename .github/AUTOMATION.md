@@ -54,14 +54,17 @@ The pull request stays open, and a comment says why, when:
   guarantee it cannot prove;
 - fewer unit tests pass after the upgrade than before it (one was deleted,
   skipped, or no longer runs), or the count could not be read;
-- the agent changed the end-to-end suite, the configuration of a check
-  (linter, type checker, test runner), a script CI runs to judge a pull
-  request, or the npm scripts that launch the checks. Green checks only mean
-  something if what judges the change is not part of the change.
+- the end-to-end suite lost a scenario it had before the upgrade;
+- the agent changed the configuration of a check (linter, type checker, test
+  runner), a script CI runs to judge a pull request (the packaged-app check,
+  the scope probe), or the npm scripts that launch the checks. Green checks
+  only mean something if what judges the change is not part of the change.
 
-Unit tests are deliberately **not** on that list. A new major changes the APIs
-the tests use nearly every time, so the agent adapts them, and that alone does
-not wait for anyone: its report lists each test file it changed and why.
+The tests are deliberately **not** on that list, neither the unit tests nor
+the end-to-end suite (`scripts/smoke.mjs`, `scripts/fixtures/`). A new major
+changes what they use nearly every time, so the agent adapts them, and that
+alone does not wait for anyone: its report lists what it changed there and
+why.
 
 Merge it by hand after reading it, or ask `@claude` in the pull request to fix
 what fails. A dependency is attempted once per major: closing its pull request
@@ -137,11 +140,12 @@ Stated plainly, because everything above runs without review:
   end-to-end suite on three OSes, the agent's own verdict and the "judges
   unchanged" rule. A regression none of them sees ships. The most exposed
   area is the one the tests cannot fully cover: what Stream Mode paints.
-- **The agent may rewrite the unit tests that judge its own work**, and that
-  merges without review. A test changed to agree with a regression passes.
-  What the agent cannot touch without a person looking is the end-to-end
-  suite, the configuration of the checks and the count of passing tests
-  (deleting or skipping one holds the merge).
+- **The agent may rewrite the tests that judge its own work**, the unit tests
+  and the end-to-end suite alike, and that merges without review. A test or a
+  scenario changed to agree with a regression passes; for Stream Mode the
+  end-to-end suite is the only check of what is really painted. What the
+  agent cannot do without a person looking: delete or skip a unit test, drop
+  an end-to-end scenario, or change the configuration of the checks.
 - A dependency that publishes a bad version passes CI and merges like any
   other; the automatic release then ships it. Dependabot's three-day cooldown
   is the only delay.

@@ -20,17 +20,19 @@
 #   - fewer unit tests pass after the upgrade than before it (a test deleted
 #     or skipped to get to green, a new major of the test runner quietly
 #     running less);
-#   - the agent changed the end-to-end suite, the configuration of a check
-#     (the linter's, the type checker's, the test runner's), a script CI runs
-#     to judge a pull request, or the npm scripts that launch the checks. "CI
-#     is green" only means something if what judges the change is not part of
-#     the change: an upgrade that needed its judges edited gets one human
-#     click instead of none.
+#   - the end-to-end suite lost a scenario it had before the upgrade;
+#   - the agent changed the configuration of a check (the linter's, the type
+#     checker's, the test runner's), a script CI runs to judge a pull request
+#     (the packaged-app check, the scope probe), or the npm scripts that
+#     launch the checks. "CI is green" only means something if what judges
+#     the change is not part of the change: an upgrade that needed its judges
+#     edited gets one human click instead of none.
 #
-# Editing UNIT TESTS does not hold the merge: a major upgrade needs them
-# adapted nearly every time, and waiting for a person each time would make
-# none of this automatic. The count of passing tests is what is left to watch
-# them, and .github/AUTOMATION.md says plainly what that does not catch.
+# Editing the TESTS does not hold the merge, neither the unit tests nor the
+# end-to-end suite: a major upgrade needs them adapted nearly every time, and
+# waiting for a person each time would make none of this automatic. What is
+# left to watch them is that no unit test and no end-to-end scenario
+# disappears; .github/AUTOMATION.md says plainly what that does not catch.
 #
 # A retry starts from scratch: a pull request left by a previous attempt has
 # its auto-merge switched off before anything new is pushed to it.
@@ -261,16 +263,30 @@ jobs:
           if [ -n "$dropped" ]; then
             hold+="- the agent edited files under \`.github/\`, which were discarded (see its report for what it wanted there)\n"
           fi
-          # What judges the change must not be part of the change: the
-          # end-to-end suite, the scripts CI judges a pull request with, and
-          # the configuration of each check. Unit tests are NOT on this list,
-          # on the maintainer's decision: a new major changes the APIs they
-          # use nearly every time, so the agent adapts them and that alone
-          # waits for nobody. What watches them is the count of passing
-          # tests, compared above.
-          judges_changed="$(git diff --cached --name-only | grep -E '^scripts/(smoke|check-packaged|version-only-diff)\.mjs$|^scripts/fixtures/|^vitest\.config\.ts$|^eslint\.config\.mjs$|^tsconfig[^/]*\.json$' || true)"
+          # What judges the change must not be part of the change: the scripts
+          # CI judges a pull request with and the configuration of each
+          # check. The TESTS are not on this list, on the maintainer's
+          # decision: a new major changes what they use nearly every time, so
+          # the agent adapts the unit tests and the end-to-end suite
+          # (scripts/smoke.mjs, scripts/fixtures/) and that alone waits for
+          # nobody. What is left to watch them: the count of passing unit
+          # tests, compared above, and the end-to-end scenarios, just below.
+          judges_changed="$(git diff --cached --name-only | grep -E '^scripts/(check-packaged|version-only-diff)\.mjs$|^vitest\.config\.ts$|^eslint\.config\.mjs$|^tsconfig[^/]*\.json$' || true)"
           if [ -n "$judges_changed" ]; then
-            hold+="- the agent changed the end-to-end suite, a script CI judges a pull request with, or the configuration of a check, so green checks do not vouch for it on their own:\n$(printf '%s\n' "$judges_changed" | sed 's/^/  - `/; s/$/`/')\n"
+            hold+="- the agent changed a script CI judges a pull request with, or the configuration of a check, so green checks do not vouch for it on their own:\n$(printf '%s\n' "$judges_changed" | sed 's/^/  - `/; s/$/`/')\n"
+          fi
+          # The agent may adapt the end-to-end suite; it may not get to green
+          # by dropping a scenario. Every scenario the suite had when the
+          # branch started (its pass('NAME') calls) must still be there, as
+          # code: a call left in a comment does not count. Unlistable counts
+          # as lost.
+          scenarios() { grep -oE "^[[:space:]]*pass\('[^']+'\)" "$1" | sed 's/^[[:space:]]*//' | sort -u; }
+          git show HEAD:scripts/smoke.mjs > "$RUNNER_TEMP/smoke-before.mjs" || true
+          scenarios "$RUNNER_TEMP/smoke-before.mjs" > "$RUNNER_TEMP/scenarios-before.txt" || true
+          scenarios scripts/smoke.mjs > "$RUNNER_TEMP/scenarios-after.txt" || true
+          scenarios_lost="$(comm -23 "$RUNNER_TEMP/scenarios-before.txt" "$RUNNER_TEMP/scenarios-after.txt")"
+          if [ ! -s "$RUNNER_TEMP/scenarios-before.txt" ] || [ -n "$scenarios_lost" ]; then
+            hold+="- the end-to-end suite lost scenarios it had before the upgrade, or they could not be listed:\n$(printf '%s\n' "$scenarios_lost" | sed "s/^pass('/  - \`/; s/')\$/\`/")\n"
           fi
           # Same idea for the npm scripts: every check is launched through
           # one ("test": "vitest run"), here and in CI. An upgrade that

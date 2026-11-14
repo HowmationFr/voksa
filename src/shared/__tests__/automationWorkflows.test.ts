@@ -98,7 +98,10 @@ describe('agent-upgrade.yml: the agent cannot push, merge or publish', () => {
   });
 
   it('the checkout leaves no credential in the git configuration', () => {
-    expect(stepBlock(agentUpgrade, 'uses: actions/checkout@v7')).toContain('persist-credentials: false');
+    // Found by name, not by version: Dependabot bumps the version.
+    const checkouts = steps.filter((step) => /uses: actions\/checkout@/.test(step));
+    expect(checkouts).toHaveLength(1);
+    expect(checkouts[0]).toContain('persist-credentials: false');
   });
 
   it('the workflow token cannot write to the repository contents', () => {
@@ -251,7 +254,7 @@ describe('what judges a change must not be part of it: the list matches this rep
 
   it('the list is read from the workflow', () => {
     expect(source.length).toBeGreaterThan(20);
-    expect(isJudge('scripts/smoke.mjs')).toBe(true);
+    expect(isJudge('scripts/check-packaged.mjs')).toBe(true);
   });
 
   // The maintainer's decision: a major upgrade needs its unit tests adapted
@@ -278,12 +281,30 @@ describe('what judges a change must not be part of it: the list matches this rep
     expect(configs.filter((file) => !isJudge(file))).toEqual([]);
   });
 
-  it('so is every script CI runs to judge a pull request, and the end-to-end fixtures', () => {
-    const scripts = [...ci.matchAll(/node (scripts\/[\w.-]+\.mjs)/g)].map((m) => m[1]);
-    expect([...new Set(scripts)].sort()).toEqual(['scripts/check-packaged.mjs', 'scripts/smoke.mjs', 'scripts/version-only-diff.mjs']);
-    expect(scripts.filter((file) => !isJudge(file))).toEqual([]);
+  it('so is every script CI runs to judge a pull request, except the end-to-end suite', () => {
+    const scripts = [...new Set([...ci.matchAll(/node (scripts\/[\w.-]+\.mjs)/g)].map((m) => m[1]))].sort();
+    expect(scripts).toEqual(['scripts/check-packaged.mjs', 'scripts/smoke.mjs', 'scripts/version-only-diff.mjs']);
     for (const file of scripts) expect(fs.existsSync(path.join(ROOT, file)), file).toBe(true);
-    expect(walk('scripts/fixtures').filter((file) => !isJudge(file))).toEqual([]);
+    // The maintainer's decision again: the agent adapts the end-to-end suite
+    // and its fixtures, and the upgrade still merges on its own.
+    expect(scripts.filter((file) => !isJudge(file))).toEqual(['scripts/smoke.mjs']);
+    expect(walk('scripts/fixtures').filter(isJudge)).toEqual([]);
+  });
+
+  it('what watches the end-to-end suite instead: none of its scenarios may disappear', () => {
+    // The workflow's own pattern, applied to the real suite: it must see
+    // every scenario, or a dropped one would go unnoticed.
+    const pattern = /grep -oE "([^"]+)" "\$1"/.exec(stepRun(agentUpgrade, 'id: pr'))?.[1] ?? '';
+    expect(pattern).toContain('pass');
+    const smoke = readRepoFile('scripts/smoke.mjs');
+    const listed = smoke.match(new RegExp(pattern.replace(/\[\[:space:\]\]/g, '\\s'), 'gm')) ?? [];
+    const names = listed.map((call) => call.trim());
+    expect(names.length).toBeGreaterThan(30);
+    expect(names).toContain("pass('PANIC')");
+    expect(names).toContain("pass('LOCAL FILE IN A TAB')");
+    // Every call site of the suite is one the pattern lists: no scenario
+    // named through a variable, none sharing a line with other code.
+    expect(smoke.match(/\bpass\(/g)).toHaveLength(names.length);
   });
 
   it('the checks themselves are launched through npm scripts, which the gate compares', () => {
@@ -302,6 +323,8 @@ describe('what judges a change must not be part of it: the list matches this rep
       'src/main/main.ts',
       'src/ui/App.tsx',
       'src/shared/__tests__/urlUtils.test.ts',
+      'scripts/smoke.mjs',
+      'scripts/fixtures/contract-extension/manifest.json',
       'scripts/build-main.mjs',
       'vite.config.ts',
     ]) {

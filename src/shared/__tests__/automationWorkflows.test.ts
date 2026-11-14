@@ -333,21 +333,76 @@ describe('what judges a change must not be part of it: the list matches this rep
   });
 });
 
-describe('dependabot-automerge.yml: only patch and minor updates merge on their own', () => {
+describe.runIf(canRunSteps())('dependabot-automerge.yml: which Dependabot updates merge on their own', () => {
   const automerge = readWorkflow('dependabot-automerge.yml');
+  const script = stepRun(automerge, 'id: decide');
+  const NPM = 'dependabot/npm_and_yarn/electron-45.3.0';
+  const ACTIONS = 'dependabot/github_actions/actions-640176b5ab';
+  const PR_URL = 'https://github.com/owner/repo/pull/9';
+  const PATCH = 'version-update:semver-patch';
+  const MINOR = 'version-update:semver-minor';
+  const MAJOR = 'version-update:semver-major';
 
-  it('the merge step is conditioned on the update type', () => {
-    const step = stepBlock(automerge, 'name: Enable auto-merge for patch/minor updates');
-    const condition = /^\s+if: (.*)$/m.exec(step)?.[1] ?? '';
-    expect(condition).toContain("== 'version-update:semver-patch'");
-    expect(condition).toContain("== 'version-update:semver-minor'");
-    expect(condition).not.toContain('semver-major');
-    expect(condition).not.toContain('!=');
-    expect(step).toContain('gh pr merge --auto --squash');
+  /** Runs the decision; true when auto-merge was enabled on the pull request. */
+  async function merges(branch: string, updateType: string, dependencies: string): Promise<boolean> {
+    const cwd = fs.mkdtempSync(path.join(sandbox, 'automerge-'));
+    const result = await runStep({
+      script,
+      cwd,
+      fakes: { gh: 'echo "gh $*" >> "$CALLS"\n' },
+      env: { HEAD_REF: branch, UPDATE_TYPE: updateType, DEPENDENCIES: dependencies, PR_URL },
+    });
+    expect(result.status, result.said).toBe(0);
+    const merged = result.calls.includes(`gh pr merge --auto --squash ${PR_URL}`);
+    // Either that one call, or nothing at all.
+    expect(result.calls).toHaveLength(merged ? 1 : 0);
+    expect(result.summary).toContain(merged ? 'Merges on its own' : 'Waits for a person');
+    return merged;
+  }
+
+  it.each<[string, string, string, string]>([
+    ['an npm patch (an Electron patch release: Chromium fixes)', NPM, PATCH, 'electron'],
+    ['a group of npm minors', NPM, MINOR, 'react, nanoid, zustand'],
+    ['a GitHub Action minor', ACTIONS, MINOR, 'actions/setup-node'],
+    // An action is referenced by its major: nearly every update of one is a
+    // "major", and waiting for a person each time meant waiting every time.
+    ['a GitHub Action major (actions/checkout 4 to 7)', ACTIONS, MAJOR, 'actions/checkout'],
+    ['a group of actions with a major among them', ACTIONS, MAJOR, 'actions/checkout, actions/setup-node, dependabot/fetch-metadata'],
+    ['a minor of the action that runs the upgrade agent', ACTIONS, MINOR, 'anthropics/claude-code-action'],
+    ['a major of an action that only resembles it', ACTIONS, MAJOR, 'someone/anthropics/claude-code-action-next, anthropics/claude-code-action-base'],
+  ])('merges on its own: %s', async (_name, branch, updateType, dependencies) => {
+    expect(await merges(branch, updateType, dependencies)).toBe(true);
   });
 
-  it('and only for Dependabot\'s own pull requests', () => {
+  it.each<[string, string, string, string]>([
+    // What the agent may do is passed to that action as inputs: a new major
+    // can rename or reinterpret them without any check noticing.
+    ['a major of the action that runs the upgrade agent', ACTIONS, MAJOR, 'anthropics/claude-code-action'],
+    ['the same, even grouped with other actions', ACTIONS, MAJOR, 'actions/checkout, anthropics/claude-code-action'],
+    ['a major of an npm package (the upgrade agent does those)', NPM, MAJOR, 'react'],
+    ['an update type it does not know', ACTIONS, 'version-update:semver-epoch', 'actions/checkout'],
+    ['no update type at all (the metadata step said nothing)', NPM, '', 'electron'],
+    ['a major on a branch that only resembles Dependabot\'s', 'feature/dependabot/github_actions/x', MAJOR, 'actions/checkout'],
+  ])('waits for a person: %s', async (_name, branch, updateType, dependencies) => {
+    expect(await merges(branch, updateType, dependencies)).toBe(false);
+  });
+
+  it('only acts on Dependabot\'s own pull requests, with what Dependabot says about them', () => {
     expect(automerge).toContain("if: github.actor == 'dependabot[bot]'");
+    const step = stepBlock(automerge, 'id: decide');
+    expect(step).toContain('HEAD_REF: ${{ github.head_ref }}');
+    expect(step).toContain('UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}');
+    expect(step).toContain('DEPENDENCIES: ${{ steps.metadata.outputs.dependency-names }}');
+    expect(step).not.toMatch(/^\s+if:/m);
+  });
+
+  it('the action it holds back is the one the upgrade agent runs on, and has its own pull request', () => {
+    const agentAction = /uses: (anthropics\/[\w-]+)@/.exec(agentUpgrade)?.[1] ?? '';
+    expect(agentAction).not.toBe('');
+    expect(script).toContain(`*,${agentAction},*)`);
+    // Alone in its pull request, so its majors never hold the other actions.
+    const actions = readRepoFile('.github/dependabot.yml').split('- package-ecosystem: github-actions')[1] ?? '';
+    expect(actions).toMatch(new RegExp(`exclude-patterns:\\n\\s+- ${agentAction}\\n`));
   });
 });
 

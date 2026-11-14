@@ -56,6 +56,12 @@ updates:
     groups:
       # All CI action bumps ride ONE PR: three separate action PRs are three
       # links of an update-branch cascade under the strict up-to-date rule.
+      # It merges on its own, majors included (dependabot-automerge.yml).
       actions:
         patterns:
           - "*"
+        # Except the action that runs the upgrade agent: it gets its own pull
+        # request, because a major of it waits for a person and must not
+        # hold the other actions back.
+        exclude-patterns:
+          - anthropics/claude-code-action

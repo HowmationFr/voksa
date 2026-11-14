@@ -1,0 +1,87 @@
+# Auto-merge only merges a pull request that is up to date with main (the
+# "main" ruleset is strict about it), and GitHub never brings one up to date
+# by itself. So whenever main moves, a pull request that was waiting for its
+# CI falls behind and then waits forever, green, for someone to click "Update
+# branch". Dependabot rebases its own pull requests; nobody did it for the
+# others: the upgrade agent's, the release pull request between two polls, or
+# the maintainer's own once auto-merge is on.
+#
+# After every push to main this brings those pull requests up to date, which
+# re-runs their CI and lets auto-merge finish. It only touches pull requests
+# that already have auto-merge ENABLED: that switch is the decision to merge,
+# this only removes the click that was left.
+#
+# Left alone on purpose:
+#   - Dependabot's pull requests (it rebases them itself, and stops doing so
+#     once someone else pushes to them);
+#   - pull requests from forks (not ours to push to);
+#   - drafts, and pull requests without auto-merge.
+#
+# Needs the AUTOMATION_TOKEN secret (see .github/AUTOMATION.md): an update
+# pushed with the default GITHUB_TOKEN would not start CI on the pull request.
+name: Keep auto-merge pull requests up to date
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: automerge-keep-current
+  # A newer push to main supersedes the pass that was running.
+  cancel-in-progress: true
+
+jobs:
+  update:
+    name: Update the pull requests waiting behind main
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.AUTOMATION_TOKEN }}
+    steps:
+      - name: Bring them up to date
+        id: update
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::The AUTOMATION_TOKEN secret is missing (see .github/AUTOMATION.md)."
+            exit 1
+          fi
+          # number, state against main, auto-merge on, from a fork, draft, bot.
+          list() {
+            gh pr list -R "$GITHUB_REPOSITORY" --state open --limit 100 \
+              --json number,mergeStateStatus,autoMergeRequest,isCrossRepository,isDraft,author \
+              --jq '.[] | [.number, .mergeStateStatus, (.autoMergeRequest != null), .isCrossRepository, .isDraft, .author.is_bot] | @tsv'
+          }
+          # GitHub works out "behind" lazily after a push: ask again while any
+          # candidate is still UNKNOWN (about a minute at most).
+          for attempt in $(seq 1 6); do
+            list > "$RUNNER_TEMP/prs.tsv"
+            unknown=0
+            while IFS="$(printf '\t')" read -r number state auto fork draft bot; do
+              if [ "$auto" = "true" ] && [ "$fork" = "false" ] && [ "$draft" = "false" ] && [ "$bot" = "false" ] && [ "$state" = "UNKNOWN" ]; then
+                unknown=1
+              fi
+            done < "$RUNNER_TEMP/prs.tsv"
+            [ "$unknown" = "1" ] || break
+            sleep 10
+          done
+          updated=0
+          while IFS="$(printf '\t')" read -r number state auto fork draft bot; do
+            [ -n "$number" ] || continue
+            if [ "$auto" != "true" ] || [ "$fork" != "false" ] || [ "$draft" != "false" ] || [ "$bot" != "false" ]; then
+              continue
+            fi
+            if [ "$state" = "BEHIND" ]; then
+              # One that cannot be updated (a conflict) must not stop the others.
+              if gh pr update-branch "$number" -R "$GITHUB_REPOSITORY"; then
+                updated=$((updated + 1))
+                echo "Updated pull request #$number." | tee -a "$GITHUB_STEP_SUMMARY"
+              else
+                echo "::warning::Pull request #$number is behind main and could not be updated (a conflict?)."
+              fi
+            fi
+          done < "$RUNNER_TEMP/prs.tsv"
+          echo "updated=$updated" >> "$GITHUB_OUTPUT"
+          echo "Pull requests brought up to date: $updated." | tee -a "$GITHUB_STEP_SUMMARY"

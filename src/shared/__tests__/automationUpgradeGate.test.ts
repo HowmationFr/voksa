@@ -160,6 +160,9 @@ async function decide(scenario: Scenario): Promise<Outcome> {
       FROM: '1',
       TO: '2',
       BRANCH: 'automation/test',
+      // What the job computes from its inputs (checked in automationWorkflows).
+      TITLE: 'chore(deps): upgrade somepkg from 1 to 2',
+      ISSUE: '',
       AUTOMATION_TOKEN: TOKEN,
       GH_TOKEN: TOKEN,
       AGENT_OUTCOME: 'success',
@@ -227,6 +230,12 @@ const MERGES: Record<string, Scenario> = {
     files: withUpgrade({ 'scripts/build-main.mjs': '// build, adapted\n' }),
   },
   'a retry on a pull request left by a previous attempt': { report: READY, env: { FAKE_OPEN_PR: '41' } },
+  // The repair of a Dependabot update that did not pass: same gate, its own
+  // title, and the issue that reported it closes with the merge.
+  'the repair of a Dependabot update': {
+    report: READY,
+    env: { TITLE: 'fix(deps): make the Dependabot update of #129 pass', FROM: '', TO: '', ISSUE: '12' },
+  },
 };
 
 /** One thing out of order each: held, as an ordinary pull request. */
@@ -486,9 +495,20 @@ describe.runIf(canRunSteps())('agent-upgrade.yml: does this upgrade merge on its
     it('one commit, in the name of the token owner, titled like a dependency update', () => {
       for (const name of [...Object.keys(MERGES), ...Object.keys(HELD), ...Object.keys(DRAFTS)]) {
         const { commit } = of(name);
-        expect(commit?.subject, name).toBe('chore(deps): upgrade somepkg from 1 to 2');
+        expect(commit?.subject, name).toBe(all[name].env?.TITLE ?? 'chore(deps): upgrade somepkg from 1 to 2');
         expect(commit?.author, name).toBe('tester <4242+tester@users.noreply.github.com>');
       }
+    });
+
+    it('a repair carries its own title, and closes the issue that reported the red CI', () => {
+      const repair = of('the repair of a Dependabot update');
+      expect(repair.commit?.subject).toBe('fix(deps): make the Dependabot update of #129 pass');
+      const create = repair.calls.find((call) => call.startsWith('gh pr create')) ?? '';
+      expect(create).toContain('--title fix(deps): make the Dependabot update of #129 pass');
+      expect(repair.body).toContain('**fix(deps): make the Dependabot update of #129 pass**');
+      expect(repair.body).toContain('\nCloses #12\n');
+      // No tracking issue, nothing to close.
+      expect(of('everything in order').body).not.toContain('Closes #');
     });
 
     it('the report is the pull request description, never a committed file', () => {
@@ -600,6 +620,14 @@ describe.runIf(canRunSteps())('agent-upgrade.yml: the checks are measured by the
     expect(result.calls).toContain('xvfb-run -a node scripts/smoke.mjs');
   });
 
+  it('a repair has no target major to check: the update is whatever Dependabot made', async () => {
+    const result = await check({ TO: '' }, null);
+    expect(result.status, result.said).toBe(0);
+    expect(result.outputs.failed).toBe('0');
+    expect(table(result)).not.toContain('is at major');
+    expect(table(result).match(/\| passed \|/g)).toHaveLength(5);
+  });
+
   it.each([
     ['still at the old major', '1.9.0'],
     ['past the target major', '3.0.0'],
@@ -638,10 +666,15 @@ describe.runIf(canRunSteps())('agent-upgrade.yml: the checks are measured by the
 describe.runIf(canRunSteps())('agent-upgrade.yml: before the agent starts', () => {
   const script = stepRun(workflow, 'id: start');
 
-  function start(env: Record<string, string>): Promise<StepResult & { repo: GitFixture }> {
+  function start(
+    env: Record<string, string>,
+    prepare: (repo: GitFixture) => void = () => {},
+  ): Promise<StepResult & { repo: GitFixture }> {
     const repo = new GitFixture(sandbox);
     repo.writeText('.github/automation/playbook.md', '# Playbook\n');
+    repo.writeText('package.json', json({ devDependencies: { electron: '^45.2.3', vitest: '^4.0.0' } }));
     repo.commit('base');
+    prepare(repo);
     return runStep({
       script,
       cwd: repo.dir,
@@ -650,11 +683,54 @@ describe.runIf(canRunSteps())('agent-upgrade.yml: before the agent starts', () =
         PLAYBOOK: '.github/automation/playbook.md',
         BRANCH: 'automation/test',
         INSTALL: '',
+        MERGE_REF: '',
         FAKE_REPORT: '{"numPassedTests":531}',
         ...env,
       },
     }).then((result) => ({ ...result, repo }));
   }
+
+  /** A Dependabot branch, as the checkout fetches it: origin/dependabot/npm_and_yarn/electron. */
+  const DEPENDABOT = 'dependabot/npm_and_yarn/electron-45.3.0';
+  function dependabotBranch(repo: GitFixture): void {
+    repo.git(['switch', '-q', '-c', 'bump']);
+    repo.writeText('package.json', json({ devDependencies: { electron: '^45.3.0', vitest: '^4.0.0' } }));
+    const tip = repo.commit('chore(deps-dev): bump electron from 45.2.3 to 45.3.0');
+    repo.git(['update-ref', `refs/remotes/origin/${DEPENDABOT}`, tip]);
+    repo.git(['switch', '-q', 'main']);
+    repo.git(['branch', '-q', '-D', 'bump']);
+  }
+
+  describe('a repair starts from the update that does not pass', () => {
+    it('applies it on top of main, uncommitted, after the test count was taken on code that passes', async () => {
+      const result = await start({ MERGE_REF: DEPENDABOT }, dependabotBranch);
+      expect(result.status, result.said).toBe(0);
+      expect(result.outputs.tests).toBe('531');
+      expect(result.repo.git(['branch', '--show-current']).trim()).toBe('automation/test');
+      // The update is in the working tree...
+      expect(result.repo.readJson<{ devDependencies: Record<string, string> }>('package.json').devDependencies.electron).toBe('^45.3.0');
+      // ...and not committed: the pull request will carry update and fix as one commit.
+      expect(result.repo.git(['log', '-1', '--format=%s']).trim()).toBe('base');
+      expect(result.repo.git(['diff', '--cached', '--name-only']).trim()).toBe('package.json');
+      // Counted BEFORE the update, installed again AFTER it.
+      expect(result.calls.map((call) => call.split(' ').slice(0, 2).join(' '))).toEqual(['npm ci', 'npx vitest', 'npm ci']);
+    });
+
+    it('stops when the update no longer applies on main (Dependabot rebases it, the next red run retries)', async () => {
+      const result = await start({ MERGE_REF: DEPENDABOT }, (repo) => {
+        dependabotBranch(repo);
+        repo.writeText('package.json', json({ devDependencies: { electron: '^46.0.0', vitest: '^4.0.0' } }));
+        repo.commit('main moved on the same line');
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.said).toContain('does not apply on main any more');
+    });
+
+    it('stops when the branch to repair does not exist', async () => {
+      const result = await start({ MERGE_REF: 'dependabot/npm_and_yarn/gone' });
+      expect(result.status).not.toBe(0);
+    });
+  });
 
   it('counts the unit tests on the untouched code, then bumps', async () => {
     const result = await start({ INSTALL: 'npm install --save-dev "electron@^46.0.0"' });

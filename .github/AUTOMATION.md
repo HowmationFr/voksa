@@ -11,8 +11,10 @@ in the loop, and the cases where it stops and asks for a person.
 |---|---|---|
 | A dependency publishes a patch or minor version | Dependabot opens a pull request (`dependabot.yml`) | weekdays, three days after the release (Dependabot's default cooldown) |
 | CI runs on it (types, lint, tests, build, packaging, end-to-end smoke on Windows, macOS, Linux) | `ci.yml` | on the pull request |
-| A check fails | `dependabot-ci-retry.yml` re-runs the failed jobs once, then opens an issue if it is still red | on failure |
+| A check fails | `dependabot-ci-retry.yml` re-runs the failed jobs once | on failure |
+| It is still red | the same workflow opens an issue and has the update repaired by the agent, as a pull request of its own that merges once green (see below) | on the second failure |
 | CI is green | `dependabot-automerge.yml` merges it | immediately |
+| `main` moved while a pull request was waiting for its CI | `automerge-keep-current.yml` brings it up to date, so auto-merge can finish | on every push to `main` |
 | Something that ships inside a build changed since the last release | `auto-release.yml` opens the release pull request, lets it merge, tags it | checked daily at 14:17 UTC, at most one release every 4 days |
 | The tag exists | `release.yml` builds and signs the installers, verifies the draft, and publishes it | on the tag |
 | A release is published | every installed copy updates itself (`electron-updater`) | at its next check |
@@ -25,6 +27,34 @@ nothing in the product and releases nothing. An automatic release ships
 everything on `main`, which only ever receives pull requests that passed the
 full CI, and only ever moves the last number of the version (0.9.1 becomes
 0.9.2), whatever was updated.
+
+### When an update stays red
+
+Being told that a security fix is stuck only moves the wait. After the retry,
+`dependabot-ci-retry.yml` hands the update to the agent
+(`agent-upgrade.yml`, following
+[`automation/dependabot-fix.md`](automation/dependabot-fix.md)): the update is
+applied on a branch of its own, Claude finds what it breaks and fixes the
+code, the workflow re-runs every check, and the repair comes as a pull request
+that goes through the same gate as a major upgrade: it merges on its own once
+CI is green, or waits for a person for the reasons listed further down. The
+issue that reported the red CI closes when the repair merges, and Dependabot
+then closes its own pull request (nothing left to update).
+
+One repair per Dependabot pull request, and only for npm updates (an update of
+a GitHub Action changes workflow files, which the automation token cannot
+push). The agent runs on Linux: a failure that only exists on Windows or
+macOS, or a flaky run, it cannot reproduce, and its playbook tells it to say
+so and change nothing.
+
+### Pull requests that fall behind
+
+The `main` ruleset only merges a pull request that is up to date with `main`,
+and GitHub never updates one by itself: a pull request set to merge would
+wait forever, green, behind a later merge. `automerge-keep-current.yml`
+updates those on every push to `main`. It only touches pull requests whose
+auto-merge is already on (that switch is the decision to merge), never
+Dependabot's (it rebases its own), a fork's, or a draft.
 
 ### GitHub Actions
 
@@ -108,6 +138,15 @@ only proven by the workflows running.
   ahead of the last tag, automatic releases stand aside.
 - The two patched extension libraries (pinned, see `dependabot.yml`): a bump
   means porting their patches.
+- **Every pull request a person opens.** Nothing above removed a review: the
+  `main` ruleset never required an approval, and what merges unattended does
+  so because auto-merge was switched on for it, by a workflow that recognises
+  its author (Dependabot, the upgrade agent, the release). No workflow
+  switches it on for anyone else. A contributor's pull request comes from a
+  fork: its CI does not even start before the maintainer allows it (first
+  contribution), nothing enables auto-merge on it, and its author cannot
+  merge. It waits to be read and merged by the maintainer, whose own pull
+  requests merge when the maintainer says so (`gh pr merge --auto --merge`).
 
 ## Setup (once)
 
@@ -144,6 +183,8 @@ the change by hand.
   Set the variable `AUTO_RELEASE_MIN_DAYS` to another number to change it.
   Running `auto-release.yml` by hand releases immediately, whatever the
   spacing (an urgent fix).
+- Repairs of Dependabot updates that stay red: set the variable
+  `DEPENDABOT_REPAIR` to `off`. The retry and the issue stay.
 - One release or one upgrade in particular: close its pull request before it
   merges, or turn off auto-merge on it.
 - Major upgrades, or anything else: disable the workflow from the Actions tab.

@@ -208,30 +208,65 @@ describe('agent-upgrade.yml: the agent cannot push, merge or publish', () => {
   });
 });
 
-describe('the two callers of agent-upgrade.yml', () => {
+describe('the callers of agent-upgrade.yml', () => {
   const declared = [...agentUpgrade.matchAll(/^ {6}([a-z_]+):\n {8}description:/gm)].map((m) => m[1]);
   const required = [...agentUpgrade.matchAll(/^ {6}([a-z_]+):\n(?: {8}.*\n)*? {8}required: true/gm)]
     .map((m) => m[1])
     .filter((name) => declared.includes(name));
+  /** The inputs one caller passes, by job. */
+  const inputsOf = (name: string, jobName: string): string[] => {
+    const job = jobBlock(readWorkflow(name), jobName);
+    return [...job.slice(job.indexOf('\n    with:\n')).matchAll(/^ {6}([a-z_]+):/gm)].map((m) => m[1]);
+  };
 
   it('the inputs are read (a guard for the parsing above)', () => {
-    expect(declared.sort()).toEqual(['branch', 'from', 'install', 'issue', 'package', 'playbook', 'to']);
-    expect(required.sort()).toEqual(['branch', 'from', 'package', 'playbook', 'to']);
+    expect(declared.sort()).toEqual([
+      'branch', 'from', 'install', 'issue', 'merge_ref', 'package', 'playbook', 'task', 'title', 'to',
+    ]);
+    expect(required.sort()).toEqual(['branch', 'package', 'playbook']);
   });
 
-  it.each(['electron-major.yml', 'dependency-majors.yml'])('%s gives it what it needs', (name) => {
-    const job = jobBlock(readWorkflow(name), 'upgrade');
+  it.each([
+    ['electron-major.yml', 'upgrade'],
+    ['dependency-majors.yml', 'upgrade'],
+    ['dependabot-ci-retry.yml', 'repair'],
+  ])('%s gives it what it needs', (name, jobName) => {
+    const job = jobBlock(readWorkflow(name), jobName);
     expect(job).toContain('uses: ./.github/workflows/agent-upgrade.yml');
     expect(job).toContain('secrets: inherit');
     // A called workflow gets at most the caller's permissions.
     for (const permission of ['contents: read', 'issues: write', 'pull-requests: write', 'id-token: write']) {
       expect(job).toContain(permission);
     }
-    const given = [...job.slice(job.indexOf('\n    with:\n')).matchAll(/^ {6}([a-z_]+):/gm)].map((m) => m[1]);
+    const given = inputsOf(name, jobName);
     for (const input of required) expect(given, input).toContain(input);
     for (const input of given) expect(declared, input).toContain(input);
-    // Never two upgrades of the same kind at once.
-    expect(readWorkflow(name)).toMatch(/\nconcurrency:\n {2}group: [a-z-]+\n {2}cancel-in-progress: false\n/);
+    // Never two of the same kind at once.
+    expect(readWorkflow(name)).toMatch(/concurrency:\n\s+group: [a-z-]+\n\s+cancel-in-progress: false\n/);
+  });
+
+  it('an upgrade names its target major (checked after the agent), a repair names the branch to repair', () => {
+    for (const name of ['electron-major.yml', 'dependency-majors.yml']) {
+      expect(inputsOf(name, 'upgrade')).toEqual(expect.arrayContaining(['from', 'to']));
+      expect(inputsOf(name, 'upgrade')).not.toContain('merge_ref');
+    }
+    const repair = inputsOf('dependabot-ci-retry.yml', 'repair');
+    expect(repair).toEqual(expect.arrayContaining(['merge_ref', 'title', 'task', 'issue']));
+    expect(repair).not.toContain('to');
+    expect(jobBlock(readWorkflow('dependabot-ci-retry.yml'), 'repair')).toContain(
+      'playbook: .github/automation/dependabot-fix.md',
+    );
+  });
+
+  it('an upgrade gets its title from its inputs, a repair brings its own', () => {
+    expect(agentUpgrade).toContain(
+      `TITLE: "\${{ inputs.title || format('chore(deps): upgrade {0} from {1} to {2}', inputs.package, inputs.from, inputs.to) }}"`,
+    );
+    expect(stepRun(agentUpgrade, 'id: pr')).toContain('title="$TITLE"');
+    expect(agentUpgrade).toContain('MERGE_REF: ${{ inputs.merge_ref }}');
+    // The branch to repair is fetched by the checkout, which still has
+    // credentials then; the agent's environment never does.
+    expect(agentUpgrade).toContain("fetch-depth: ${{ inputs.merge_ref != '' && '0' || '1' }}");
   });
 
   it('Electron goes first in the week, the other dependencies after it', () => {
@@ -403,6 +438,237 @@ describe.runIf(canRunSteps())('dependabot-automerge.yml: which Dependabot update
     // Alone in its pull request, so its majors never hold the other actions.
     const actions = readRepoFile('.github/dependabot.yml').split('- package-ecosystem: github-actions')[1] ?? '';
     expect(actions).toMatch(new RegExp(`exclude-patterns:\\n\\s+- ${agentAction}\\n`));
+  });
+});
+
+describe.runIf(canRunSteps())('automerge-keep-current.yml: a pull request set to merge does not wait behind main', () => {
+  const keeper = readWorkflow('automerge-keep-current.yml');
+  const script = stepRun(keeper, 'id: update');
+
+  /** One line of the listing: number, state against main, auto-merge, fork, draft, bot. */
+  const row = (number: number, state: string, auto = 'true', fork = 'false', draft = 'false', bot = 'false'): string =>
+    [number, state, auto, fork, draft, bot].join('\\t');
+  const listing = (...rows: string[]): string => rows.map((r) => `${r}\\n`).join('');
+
+  /** `gh pr list` answers $FAKE_PRS, after $FAKE_UNKNOWN_ROUNDS answers of $FAKE_PRS_FIRST. */
+  const FAKE_GH_LIST = `
+echo "gh $1 $2 $3" >> "$CALLS"
+case "$1 $2" in
+  "pr list")
+    asked="$(cat "$RUNNER_TEMP/asked" 2> /dev/null || echo 0)"
+    echo $((asked + 1)) > "$RUNNER_TEMP/asked"
+    if [ "$asked" -lt "\${FAKE_UNKNOWN_ROUNDS:-0}" ]; then printf '%b' "$FAKE_PRS_FIRST"; else printf '%b' "$FAKE_PRS"; fi ;;
+  "pr update-branch")
+    case " \${FAKE_CONFLICT:-} " in *" $3 "*) exit 1 ;; esac ;;
+esac
+exit 0
+`;
+
+  function keep(env: Record<string, string>): Promise<StepResult> {
+    const cwd = fs.mkdtempSync(path.join(sandbox, 'keep-'));
+    return runStep({ script, cwd, fakes: { gh: FAKE_GH_LIST, sleep: 'exit 0\n' }, env: { GH_TOKEN: 'x', ...env } });
+  }
+  const updates = (result: StepResult): string[] => result.calls.filter((call) => call.startsWith('gh pr update-branch'));
+
+  it('brings up to date the one that fell behind while its CI ran', async () => {
+    const result = await keep({ FAKE_PRS: listing(row(41, 'BEHIND')) });
+    expect(result.status, result.said).toBe(0);
+    expect(updates(result)).toEqual(['gh pr update-branch 41']);
+    expect(result.outputs.updated).toBe('1');
+  });
+
+  it.each<[string, string]>([
+    ['is up to date and waiting for its checks', row(41, 'BLOCKED')],
+    ['is ready to merge', row(41, 'CLEAN')],
+    ['conflicts with main (a person has to resolve it)', row(41, 'DIRTY')],
+    // Auto-merge is the decision to merge: without it, nothing is touched.
+    ['is behind but was not set to merge on its own', row(41, 'BEHIND', 'false')],
+    ['is Dependabot\'s (it rebases itself, and stops once someone else pushes)', row(41, 'BEHIND', 'true', 'false', 'false', 'true')],
+    ['comes from a fork', row(41, 'BEHIND', 'true', 'true')],
+    ['is a draft', row(41, 'BEHIND', 'true', 'false', 'true')],
+  ])('leaves alone a pull request that %s', async (_name, pr) => {
+    const result = await keep({ FAKE_PRS: listing(pr) });
+    expect(result.status, result.said).toBe(0);
+    expect(updates(result)).toEqual([]);
+    expect(result.outputs.updated).toBe('0');
+  });
+
+  it('updates every one that qualifies, and one that cannot be updated does not stop the others', async () => {
+    const result = await keep({
+      FAKE_PRS: listing(row(40, 'BEHIND'), row(41, 'BEHIND'), row(42, 'CLEAN'), row(43, 'BEHIND')),
+      FAKE_CONFLICT: '41',
+    });
+    expect(result.status, result.said).toBe(0);
+    expect(updates(result)).toEqual(['gh pr update-branch 40', 'gh pr update-branch 41', 'gh pr update-branch 43']);
+    expect(result.outputs.updated).toBe('2');
+    expect(result.said).toContain('#41 is behind main and could not be updated');
+  });
+
+  it('asks again while GitHub has not worked out yet whether it is behind', async () => {
+    const result = await keep({
+      FAKE_PRS_FIRST: listing(row(41, 'UNKNOWN')),
+      FAKE_UNKNOWN_ROUNDS: '2',
+      FAKE_PRS: listing(row(41, 'BEHIND')),
+    });
+    expect(result.status, result.said).toBe(0);
+    expect(result.calls.filter((call) => call.startsWith('gh pr list'))).toHaveLength(3);
+    expect(updates(result)).toEqual(['gh pr update-branch 41']);
+  });
+
+  it('gives up quietly when GitHub never says (the next push to main asks again)', async () => {
+    const result = await keep({ FAKE_PRS: listing(row(41, 'UNKNOWN')) });
+    expect(result.status, result.said).toBe(0);
+    expect(result.calls.filter((call) => call.startsWith('gh pr list'))).toHaveLength(6);
+    expect(updates(result)).toEqual([]);
+  });
+
+  it('nothing open: nothing to do', async () => {
+    const result = await keep({ FAKE_PRS: '' });
+    expect(result.status, result.said).toBe(0);
+    expect(result.outputs.updated).toBe('0');
+  });
+
+  it('fails loudly without the token that makes CI run on the update', async () => {
+    const result = await keep({ GH_TOKEN: '', FAKE_PRS: listing(row(41, 'BEHIND')) });
+    expect(result.status).not.toBe(0);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('runs when main moves, as the maintainer (an update pushed with the default token starts no CI)', () => {
+    expect(keeper).toMatch(/\non:\n {2}push:\n {4}branches: \[main\]\n/);
+    expect(keeper).toContain('GH_TOKEN: ${{ secrets.AUTOMATION_TOKEN }}');
+    expect(keeper).toMatch(/\npermissions:\n {2}contents: read\n/);
+  });
+});
+
+describe.runIf(canRunSteps())('dependabot-ci-retry.yml: a Dependabot update that stays red gets repaired', () => {
+  const retry = readWorkflow('dependabot-ci-retry.yml');
+  const script = stepRun(retry, 'id: report');
+  const NPM = 'dependabot/npm_and_yarn/electron-45.3.0';
+
+  const FAKE_GH_REPORT = `
+echo "gh $*" >> "$CALLS"
+case "$1 $2" in
+  "pr view") echo "chore(deps-dev): bump electron from 45.2.3 to 45.3.0" ;;
+  "pr list") echo "\${FAKE_REPAIR_PRS:-0}" ;;
+  "api repos/owner/repo/git/ref/heads/"*) [ "\${FAKE_REPAIR_BRANCH:-}" = "1" ] || exit 1 ;;
+  "issue list") printf '%s\\n' "\${FAKE_OPEN_ISSUE:-}" ;;
+  "issue create") echo "https://github.com/owner/repo/issues/31" ;;
+esac
+exit 0
+`;
+
+  async function report(env: Record<string, string> = {}): Promise<StepResult & { issueBody: string; comment: string }> {
+    const cwd = fs.mkdtempSync(path.join(sandbox, 'report-'));
+    const result = await runStep({
+      script,
+      cwd,
+      fakes: { gh: FAKE_GH_REPORT },
+      env: {
+        GH_TOKEN: 'x',
+        RUN_ID: '9001',
+        RUN_URL: 'https://github.com/owner/repo/actions/runs/9001',
+        ATTEMPT: '2',
+        PR: '129',
+        HEAD_BRANCH: NPM,
+        REPAIR: '',
+        ...env,
+      },
+    });
+    const read = (name: string): string => {
+      const file = path.join(result.temp, name);
+      return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    };
+    return { ...result, issueBody: read('issue.md'), comment: read('comment.md') };
+  }
+
+  it('an npm update: the maintainer is told, and Claude is asked to repair it', async () => {
+    const result = await report();
+    expect(result.status, result.said).toBe(0);
+    expect(result.outputs).toEqual({
+      repair: 'yes',
+      pr: '129',
+      head: NPM,
+      branch: 'automation/fix-dependabot-129',
+      issue: '31',
+      title: 'chore(deps-dev): bump electron from 45.2.3 to 45.3.0',
+    });
+    expect(result.calls.filter((call) => call.startsWith('gh issue create'))).toHaveLength(1);
+    expect(result.issueBody).toContain('@owner CI failed twice in a row on #129');
+    expect(result.issueBody).toContain('https://github.com/owner/repo/actions/runs/9001');
+    expect(result.issueBody).toContain('Claude repairs it on the branch `automation/fix-dependabot-129`');
+  });
+
+  it.each<[string, Record<string, string>, string]>([
+    [
+      'an update of a GitHub Action (the agent cannot push workflow files)',
+      { HEAD_BRANCH: 'dependabot/github_actions/actions-640176b5ab' },
+      'it is not an npm update',
+    ],
+    ['repairs switched off by the repository variable', { REPAIR: 'off' }, 'repairs are switched off'],
+    ['a repair that was already attempted (its pull request exists)', { FAKE_REPAIR_PRS: '1' }, 'already attempted'],
+    ['a repair that was already attempted (its branch exists)', { FAKE_REPAIR_BRANCH: '1' }, 'already attempted'],
+    ['a branch that only resembles Dependabot\'s', { HEAD_BRANCH: 'feature/dependabot/npm_and_yarn/x' }, 'it is not an npm update'],
+  ])('no repair, but still an issue that says why: %s', async (_name, env, why) => {
+    const result = await report(env);
+    expect(result.status, result.said).toBe(0);
+    expect(result.outputs.repair).toBe('no');
+    expect(result.outputs.issue).toBe('31');
+    expect(result.issueBody).toContain('Nobody repairs this one automatically');
+    expect(result.issueBody).toContain(why);
+    expect(result.issueBody).not.toContain('Claude repairs it');
+  });
+
+  it('one issue per pull request: a later red run comments on it instead of opening another', async () => {
+    const result = await report({ FAKE_OPEN_ISSUE: '27', ATTEMPT: '3' });
+    expect(result.status, result.said).toBe(0);
+    expect(result.calls.filter((call) => call.startsWith('gh issue create'))).toEqual([]);
+    expect(result.calls.some((call) => call.startsWith('gh issue comment 27 '))).toBe(true);
+    expect(result.comment).toContain('Still failing after another run (attempt 3)');
+    expect(result.outputs.issue).toBe('27');
+    // The repair itself is still due if it never started.
+    expect(result.outputs.repair).toBe('yes');
+  });
+
+  it('a run with no pull request attached: nothing to report, nothing to repair', async () => {
+    const result = await report({ PR: '' });
+    expect(result.status, result.said).toBe(0);
+    expect(result.written).toBe('');
+    expect(result.calls).toEqual([]);
+  });
+
+  it('only for Dependabot\'s own pull requests, after the retry, and the repair only when decided', () => {
+    const job = jobBlock(retry, 'retry');
+    expect(job).toContain("github.event.workflow_run.conclusion == 'failure' &&");
+    expect(job).toContain("github.event.workflow_run.actor.login == 'dependabot[bot]'");
+    expect(stepBlock(retry, 'name: First failure, re-run the failed jobs')).toContain(
+      'if: github.event.workflow_run.run_attempt == 1',
+    );
+    expect(stepBlock(retry, 'id: report')).toContain('if: github.event.workflow_run.run_attempt > 1');
+    expect(job).toContain('REPAIR: ${{ vars.DEPENDABOT_REPAIR }}');
+    expect(job).toContain('HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}');
+    const repair = jobBlock(retry, 'repair');
+    expect(repair).toContain('needs: retry');
+    expect(repair).toContain("if: needs.retry.outputs.repair == 'yes'");
+    expect(repair).toContain('merge_ref: ${{ needs.retry.outputs.head }}');
+    expect(repair).toContain('branch: ${{ needs.retry.outputs.branch }}');
+    expect(repair).toContain('issue: ${{ needs.retry.outputs.issue }}');
+  });
+});
+
+describe('claude-code-review.yml: the automatic review', () => {
+  const review = readWorkflow('claude-code-review.yml');
+
+  it('skips what it cannot or need not review: Dependabot, release bumps, pull requests from forks', () => {
+    const job = jobBlock(review, 'claude-review');
+    expect(job).toContain("github.actor != 'dependabot[bot]'");
+    expect(job).toContain("!startsWith(github.head_ref, 'release/')");
+    // A fork gets no secrets: the review could only fail there.
+    expect(job).toContain('github.event.pull_request.head.repo.full_name == github.repository');
+  });
+
+  it('can comment, and nothing else: it never merges', () => {
+    expect(review).not.toMatch(/gh pr merge|contents: write/);
   });
 });
 

@@ -8,6 +8,7 @@ import { useTabsStore } from '../../stores/tabsStore';
 
 // French source strings kept as data; translated at render time via t().
 const MESSAGES: Record<number, string> = {
+  [-6]: 'Ce fichier est introuvable.',
   [-105]: "L'adresse est introuvable (DNS). Vérifiez le nom du site.",
   [-106]: 'Vous semblez hors ligne.',
   [-109]: 'Le site est injoignable.',

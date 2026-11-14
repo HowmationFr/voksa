@@ -16,6 +16,7 @@ import type { SessionWindow, SessionTab } from '../storage/session';
 import { computeTabBounds } from './bounds';
 import { getSettings, setSettings } from '../storage/settings';
 import { normalizeInput } from '../../shared/urlUtils';
+import { allowsFileOpen } from '../../shared/localFiles';
 import { fullscreenLayoutActive, tabOnScreen, type LayoutState } from './panicLayout';
 import { defaultEngine } from '../search/engines';
 import { sameMaskingConfig, type StreamModeConfig } from '../../shared/streamConfig';
@@ -209,10 +210,14 @@ export class TabManager extends EventEmitter {
    * the shroud and the webdriver patch apply just like in a tab, and it is
    * wired by wirePopup() through the opener's 'did-create-window'.
    */
-  private readonly handleWindowOpen = ({
-    url,
-    disposition,
-  }: Electron.HandlerDetails): Electron.WindowOpenHandlerResponse => {
+  private handleWindowOpen(
+    { url, disposition }: Electron.HandlerDetails,
+    opener: WebContents,
+  ): Electron.WindowOpenHandlerResponse {
+    // A local file may be asked for by a page in exactly one new way: the user
+    // dropped it there (tabs set navigateOnDragDrop). Passive types open; an
+    // active document (HTML, SVG) does not, see shared/localFiles.ts.
+    if (!allowsFileOpen(url, this.urlOf(opener))) return { action: 'deny' };
     if (disposition === 'foreground-tab' || disposition === 'background-tab') {
       this.create(url, { activate: disposition !== 'background-tab' });
       return { action: 'deny' };
@@ -227,7 +232,16 @@ export class TabManager extends EventEmitter {
       };
     }
     return { action: 'deny' };
-  };
+  }
+
+  /** A page surface's current URL, '' once it is gone. */
+  private urlOf(wc: WebContents): string {
+    try {
+      return wc.isDestroyed() ? '' : wc.getURL();
+    } catch {
+      return '';
+    }
+  }
 
   /**
    * Wire a page window that is not a tab: Stream Mode frame guard (before its
@@ -251,7 +265,7 @@ export class TabManager extends EventEmitter {
       if (isGoogleAuthDomain(url, id)) setInGoogleAuthFlow(id, true);
       pwc.setUserAgent(getUaForUrl(url, id));
     });
-    pwc.setWindowOpenHandler(this.handleWindowOpen);
+    pwc.setWindowOpenHandler((details) => this.handleWindowOpen(details, pwc));
     pwc.on('did-create-window', (child) => this.wirePopup(child, ownerTabId));
   }
 
@@ -306,9 +320,23 @@ export class TabManager extends EventEmitter {
 
   create(
     url?: string,
-    opts?: { activate?: boolean; title?: string; deferLoad?: boolean; pinned?: boolean },
+    opts?: {
+      activate?: boolean;
+      title?: string;
+      deferLoad?: boolean;
+      pinned?: boolean;
+      /**
+       * The URL is text the USER entered (chrome UI): a local path may then be
+       * read as a path, like in the address bar. Left off by every caller
+       * relaying a URL from a page, an extension, the OS or a saved session,
+       * so none of those can turn "c:/…" into a local file.
+       */
+      typed?: boolean;
+    },
   ): Tab {
-    const normalized = url ? normalizeInput(url, defaultEngine()) : undefined;
+    const normalized = url
+      ? normalizeInput(url, defaultEngine(), opts?.typed ? undefined : 'none')
+      : undefined;
     const tab = new Tab({
       url: normalized,
       title: opts?.title,
@@ -1141,7 +1169,7 @@ export class TabManager extends EventEmitter {
       });
     };
 
-    wc.setWindowOpenHandler(this.handleWindowOpen);
+    wc.setWindowOpenHandler((details) => this.handleWindowOpen(details, wc));
 
     // Popups run the page preload (OAuth flows keep window.opener), so they
     // get the same Stream Mode protections, frame guard included, at every
@@ -1150,7 +1178,14 @@ export class TabManager extends EventEmitter {
       this.wirePopup(popup, tab.id);
     }) as (...args: never[]) => void);
 
-    on('will-navigate', ((_event: unknown, url: string) => {
+    on('will-navigate', ((event: Electron.Event, url: string) => {
+      // Same rule as handleWindowOpen, for a drop Chromium would rather load
+      // in place: a page that is not a local file never navigates this tab to
+      // an active local document.
+      if (!allowsFileOpen(url, this.urlOf(wc))) {
+        event.preventDefault();
+        return;
+      }
       if (isGoogleAuthDomain(url, wc.id)) setInGoogleAuthFlow(wc.id, true);
       wc.setUserAgent(getUaForUrl(url, wc.id));
     }) as (...args: never[]) => void);

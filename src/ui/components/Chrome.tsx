@@ -15,6 +15,7 @@ import { SoundSignals } from './SoundSignals';
 import type { PageMenuPayload } from '../../shared/types';
 import { ConfirmDialogHost } from './ui/ConfirmDialog';
 import { voksa } from '../lib/bridge';
+import { useFileDrop } from '../lib/useFileDrop';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useTabsStore } from '../stores/tabsStore';
 import { useStreamStore } from '../stores/streamStore';
@@ -93,6 +94,9 @@ export function Chrome(): React.ReactElement {
   useEffect(() => {
     void voksa.tabs.setOverlayMode(chromeExpanded);
   }, [chromeExpanded]);
+
+  // OS files dropped anywhere on the chrome UI open in new tabs.
+  useFileDrop();
 
   // Menu → renderer command bus (single source of truth = menu accelerators).
   useEffect(() => {

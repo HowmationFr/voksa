@@ -34,6 +34,7 @@ import {
   installNetGuards,
 } from '../netGuards';
 import { isDefaultBrowser } from '../defaultBrowser';
+import { openFilesWithDialog, openLocalPaths } from '../openFile';
 import { detectSources, runImport, type ImportSelection } from '../import/importer';
 import { getPanic } from '../stream-mode/panic';
 import { getCaptureHandshake } from '../stream-mode/captureHandshake';
@@ -241,7 +242,22 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.TAB_CREATE, (e, url?: string) => {
     const win = senderWindow(e);
     if (!win) return null;
-    return win.tabs.create(url).id;
+    // `typed`: this is the chrome UI speaking for the user (new-tab search
+    // box, bookmarks...), so a local path reads as a path, like in the
+    // address bar. Pages, extensions and the OS go through create() without it.
+    return win.tabs.create(url, { typed: true }).id;
+  });
+
+  // --- Local files ("Open file…", files dropped on the chrome UI) -----------
+  // The window comes from the SENDER, so only a chrome UI reaches these, and
+  // main re-validates every path whatever the renderer says about it.
+  ipcMain.handle(IPC.FILES_OPEN_DIALOG, (e) => {
+    const win = senderWindow(e);
+    return win ? openFilesWithDialog(win) : 0;
+  });
+  ipcMain.handle(IPC.FILES_OPEN_PATHS, (e, paths: unknown) => {
+    const win = senderWindow(e);
+    return win ? openLocalPaths(win, paths) : 0;
   });
   ipcMain.handle(IPC.TAB_CLOSE, (e, id: string) => senderWindow(e)?.tabs.close(id));
   ipcMain.handle(IPC.TAB_ACTIVATE, (e, id: string) => senderWindow(e)?.tabs.setActive(id));

@@ -8,6 +8,11 @@ export const enMain: Record<string, string> = {
   'Fichier': 'File',
   'Nouvel onglet': 'New tab',
   'Nouvelle fenêtre': 'New window',
+  'Ouvrir un fichier…': 'Open file…',
+  // Native "Open file" dialog (openFile.ts): its title and its two filters.
+  'Ouvrir un fichier': 'Open a file',
+  'Images': 'Images',
+  'Fichiers pris en charge': 'Supported files',
   'Rouvrir l’onglet fermé': 'Reopen closed tab',
   'Fermer l’onglet': 'Close tab',
   'Imprimer…': 'Print…',

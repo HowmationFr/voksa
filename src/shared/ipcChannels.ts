@@ -24,6 +24,12 @@ export const IPC = {
   TAB_CLOSE_RIGHT: 'tab:closeRight',
   CHROME_SET_OVERLAY: 'chrome:setOverlay',
 
+  // Local files in tabs. OPEN_DIALOG shows the native "Open file…" dialog;
+  // OPEN_PATHS takes the paths of files dropped on the chrome UI. Main opens
+  // only existing files of a passive type (see shared/localFiles.ts).
+  FILES_OPEN_DIALOG: 'files:openDialog',
+  FILES_OPEN_PATHS: 'files:openPaths',
+
   // Find in page
   FIND_START: 'find:start',
   FIND_STOP: 'find:stop',

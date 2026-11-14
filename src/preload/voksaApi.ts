@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { IPC, type IpcChannel } from '../shared/ipcChannels';
 import type {
   AppSettings,
@@ -91,6 +91,30 @@ export function buildVoksaApi() {
       setOverlayMode: (open: boolean) => invoke(IPC.CHROME_SET_OVERLAY, open),
       onUpdate: (handler: (tabs: TabState[]) => void): Unsubscribe =>
         on<TabState[]>(IPC.TAB_UPDATED, handler),
+    },
+    files: {
+      /** Native "Open file…" dialog. Resolves with the number of tabs opened. */
+      openDialog: (): Promise<number> => invoke(IPC.FILES_OPEN_DIALOG),
+      /**
+       * Open the OS files of a drop, each in its own tab. The real paths are
+       * read HERE (File.path is gone; webUtils only exists in a preload) and
+       * main decides which ones open: existing files of a passive type only.
+       * Resolves with the number of tabs opened.
+       */
+      openDropped: (files: File[]): Promise<number> => {
+        const paths: string[] = [];
+        for (const file of Array.isArray(files) ? files : []) {
+          try {
+            // '' for a File that is not backed by a file on disk (an image
+            // dragged out of a page): nothing to open.
+            const path = webUtils.getPathForFile(file);
+            if (path) paths.push(path);
+          } catch {
+            // not a File at all
+          }
+        }
+        return invoke(IPC.FILES_OPEN_PATHS, paths);
+      },
     },
     find: {
       start: (id: string, text: string, forward: boolean, matchCase: boolean) =>

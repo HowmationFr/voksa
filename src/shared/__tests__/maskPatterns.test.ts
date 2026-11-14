@@ -226,6 +226,117 @@ describe('hasAnyMask', () => {
   });
 });
 
+describe('local file URLs', () => {
+  // The directory of a local file names the OS account (C:/Users/<name>/...):
+  // only the file name survives, with no category to switch that off.
+  const NONE: MaskFlags = {
+    maskIPv4: false,
+    maskIPv6: false,
+    maskEmails: false,
+    maskPhones: false,
+    maskMacAddresses: false,
+    maskInternalHostnames: false,
+  };
+  const redact = (s: string) => maskText(s, NONE, null);
+
+  it('keeps the file name and drops the directory', () => {
+    expect(redact('file:///C:/Users/bob/Pictures/x.png')).toBe('file:///.../x.png');
+    expect(redact('file:///home/bob/x.png')).toBe('file:///.../x.png');
+    expect(redact('FILE:///C:/Users/bob/x.png')).toBe('file:///.../x.png');
+    expect(redact('file://nas/photos/2026/x.png')).toBe('file:///.../x.png');
+  });
+
+  it('knows every spelling that loads, not just the canonical one', () => {
+    // Java-style single slash, as build logs print it.
+    expect(redact('file:/C:/Users/bob/x.png')).toBe('file:///.../x.png');
+    // No slash at all before the drive letter.
+    expect(redact('file:C:/Users/bob/x.png')).toBe('file:///.../x.png');
+    // "file:///" typed, then an Explorer path pasted: backslashes.
+    expect(redact('file:///C:\\Users\\bob\\Pictures\\x.png')).toBe('file:///.../x.png');
+    expect(redact('file:\\\\nas\\photos\\x.png')).toBe('file:///.../x.png');
+  });
+
+  it('drops the query and the fragment with the directory', () => {
+    expect(redact('file:///C:/Users/bob/x.pdf?from=C:/Users/bob#page=2')).toBe('file:///.../x.pdf');
+  });
+
+  it('shows nothing of a folder, trailing slash or not', () => {
+    expect(redact('file:///C:/Users/bob/Pictures/')).toBe('file:///.../');
+    // The account's own folder, typed without the final slash: "bob" is not
+    // a file name.
+    expect(redact('file:///C:/Users/bob')).toBe('file:///.../');
+    expect(redact('see file:///C:/Users/bob for details.')).toBe('see file:///.../ for details.');
+  });
+
+  it('redacts a URL embedded in a sentence and keeps the words after it', () => {
+    expect(redact('opened file:///C:/Users/bob/x.png today')).toBe('opened file:///.../x.png today');
+    expect(redact('at main (file:///C:/Users/bob/app/main.js:1:1)')).toBe('at main (file:///.../main.js:1:1)');
+    expect(redact('<a href="file:///C:/Users/bob/x.png">x</a>')).toBe('<a href="file:///.../x.png">x</a>');
+  });
+
+  it('never stops at a space or an apostrophe inside the path', () => {
+    // A path as typed still has its raw spaces: "Jean Dupont" must not survive,
+    // alone or in a sentence (the "go to ..." suggestion label).
+    expect(redact('file:///C:/Users/Jean Dupont/Mes images/x.png')).toBe('file:///.../x.png');
+    expect(redact('Aller à file:///C:/Users/Jean Dupont/x.png')).toBe('Aller à file:///.../x.png');
+    expect(redact("see file:///C:/Users/O'Brien/x.png")).toBe('see file:///.../x.png');
+  });
+
+  it('treats each line on its own', () => {
+    expect(redact('file:///C:/Users/bob/a.png\nfile:///C:/Users/bob/b.png\nplain line')).toBe(
+      'file:///.../a.png\nfile:///.../b.png\nplain line',
+    );
+  });
+
+  it('is idempotent (the page masker re-masks its own output)', () => {
+    for (const s of [
+      'file:///C:/Users/bob/Pictures/x.png',
+      'file:///C:/Users/bob/Pictures/',
+      'file:///C:/Users/bob',
+      'opened file:///C:/Users/Jean Dupont/My pic.png today',
+      'see file:///C:/Users/bob for details.',
+    ]) {
+      const once = redact(s);
+      expect(redact(once), s).toBe(once);
+    }
+  });
+
+  it('reaches a fixed point through a URL parser (the hover masker reads back a.href)', () => {
+    // hoverMask writes the masked URL into href and re-masks what `a.href`
+    // returns. If parsing changed the placeholder into something that needs
+    // masking again, that loop would never end.
+    for (const s of ['file:///C:/Users/bob/x.png', 'file:///C:/Users/bob/été 2026.png', 'file:///C:/Users/bob/']) {
+      const parsed = new URL(redact(s)).href;
+      expect(redact(parsed), s).toBe(parsed);
+    }
+  });
+
+  it('leaves every other URL, and the mere mention of the scheme, untouched', () => {
+    for (const s of [
+      'https://example.com/Users/bob/x.png',
+      'profile://x/y',
+      'a file: here',
+      'voksa://settings',
+      'Use the file:// scheme',
+      'error in file:12',
+      'file://',
+    ]) {
+      expect(redact(s)).toBe(s);
+    }
+  });
+
+  it('still masks what the file name itself gives away', () => {
+    // ".png" reads as the end of the domain, so the email rule takes it too.
+    expect(mask('file:///C:/Users/bob/john.doe@example.com.png')).toBe(`file:///.../${MASK.EMAIL}`);
+  });
+
+  it("collapses a file URL that a custom replacement produced (the safe outcome wins)", () => {
+    expect(
+      maskText('open my-shortcut now', NONE, null, [], [{ from: 'my-shortcut', to: 'file:///C:/Users/bob/x.png' }]),
+    ).toBe('open file:///.../x.png now');
+  });
+});
+
 describe('isPrivateIPv4 edge cases', () => {
   it('treats malformed input as private (fail-closed)', () => {
     expect(isPrivateIPv4('999.999.999.999')).toBe(true);

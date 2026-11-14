@@ -203,6 +203,12 @@ export class Tab {
         // PDF link becomes a download instead of rendering in the tab. The
         // chromeView already sets it (print preview); tabs were the gap.
         plugins: true,
+        // A file or a link dropped on a page that has no drop zone of its own
+        // opens, like in Chrome (off by default in Electron). What may open
+        // is decided by TabManager (handleWindowOpen / will-navigate): passive
+        // local files only. TABS ONLY: never on the chromeView, which holds
+        // the voksa.* API and must never navigate.
+        navigateOnDragDrop: true,
       },
     });
 

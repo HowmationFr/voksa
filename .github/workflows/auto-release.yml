@@ -1,0 +1,164 @@
+# Automatic patch releases: what closes the gap between "the fix is on main"
+# and "users have it".
+#
+# Dependabot and its auto-merge bring security fixes to main on their own
+# (Electron patch releases above all: that is how Chromium fixes travel). But
+# users run the last RELEASE, and cutting one was manual: 0.7.1 kept shipping
+# Electron 45.0.0 while eight Electron patches came out. Once a day this
+# workflow asks scripts/release-due.mjs whether something that ships inside a
+# build changed version since the last tag, and if so does, unattended, what a
+# maintainer does by hand:
+#
+#   1. opens the release PR ("npm version patch"), which CI clears in about a
+#      minute (a pure version bump skips the heavy jobs, see ci.yml);
+#   2. lets it merge once the required checks are green;
+#   3. tags the merge commit, which starts release.yml;
+#   4. release.yml then PUBLISHES the release by itself, because its commit is
+#      marked [auto] (a release tagged by hand still stops at the draft).
+#
+# It ships everything on main, not just the dependency bump: main only ever
+# receives pull requests that passed the full CI on all three OSes.
+#
+# Needs the AUTOMATION_TOKEN secret (see .github/AUTOMATION.md): a pull
+# request or a tag created with the default GITHUB_TOKEN triggers no workflow
+# (GitHub's loop protection), so neither CI nor release.yml would ever start,
+# and the "release tags" ruleset only lets a repository role create v* tags.
+#
+# Pause it without touching this file: set the repository VARIABLE
+# AUTO_RELEASE to "off" (Settings > Secrets and variables > Actions).
+name: Auto release
+
+on:
+  schedule:
+    # After Dependabot's daily run (its PRs open and merge around 12:20 UTC):
+    # a fix merged at noon ships the same afternoon.
+    - cron: '17 14 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Release even if no shipped dependency changed
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Cut a patch release if one is due
+    if: vars.AUTO_RELEASE != 'off'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.AUTOMATION_TOKEN }}
+    steps:
+      - name: The automation token must be configured
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::The AUTOMATION_TOKEN secret is missing. Automatic releases cannot open their pull request or push their tag without it: see .github/AUTOMATION.md."
+            exit 1
+          fi
+      - uses: actions/checkout@v7
+        with:
+          # Full history and tags: release-due.mjs diffs against the last tag.
+          fetch-depth: 0
+          # Pushes below go out as the token's owner, so they trigger CI and
+          # release.yml (the default token's pushes trigger nothing).
+          token: ${{ secrets.AUTOMATION_TOKEN }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Is a release due?
+        id: due
+        run: node scripts/release-due.mjs ${{ inputs.force && '--force' || '' }}
+
+      # Commits carry the identity of the token's owner (their GitHub noreply
+      # address, nothing private): the release history stays in the
+      # maintainer's name, like a release cut by hand.
+      - name: Commit as the token's owner
+        if: steps.due.outputs.due == 'true'
+        run: |
+          login="$(gh api user --jq .login)"
+          id="$(gh api user --jq .id)"
+          git config user.name "$login"
+          git config user.email "${id}+${login}@users.noreply.github.com"
+
+      - name: Open (or refresh) the release pull request
+        id: pr
+        if: steps.due.outputs.due == 'true'
+        env:
+          NEXT: ${{ steps.due.outputs.next }}
+          NOTES: ${{ steps.due.outputs.notes }}
+        run: |
+          branch="release/v${NEXT}"
+          git switch -c "$branch"
+          # Writes the version to package.json and package-lock.json, nothing
+          # else: exactly the diff ci.yml recognises as a pure version bump.
+          npm version "$NEXT" --no-git-tag-version
+          git commit -am "chore(release): ${NEXT} [auto]"
+          # --force: a branch left by a run that died half-way is ours to redo.
+          git push --force origin "$branch"
+
+          number="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$number" ]; then
+            {
+              echo "Automatic patch release, cut because something that ships inside a build changed version since the last release:"
+              echo
+              echo "$NOTES"
+              echo
+              echo "It ships everything on \`main\`. Opened by \`.github/workflows/auto-release.yml\`; it merges on its own once CI is green, then the tag and the release follow. To stop it, close this pull request; to pause automatic releases, set the repository variable \`AUTO_RELEASE\` to \`off\`."
+            } > "$RUNNER_TEMP/release-pr.md"
+            url="$(gh pr create --base main --head "$branch" \
+              --title "chore(release): ${NEXT} [auto]" \
+              --body-file "$RUNNER_TEMP/release-pr.md")"
+            number="${url##*/}"
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          # Squash: one commit on main, titled like the PR, [auto] marker
+          # included (release.yml reads it to decide whether to publish).
+          gh pr merge "$number" --auto --squash
+
+      - name: Wait for the pull request to merge
+        id: merged
+        if: steps.due.outputs.due == 'true'
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          # ~30 minutes: the version-only CI takes about one, the margin is
+          # for a busy runner queue.
+          for attempt in $(seq 1 120); do
+            state="$(gh pr view "$PR" --json state --jq .state)"
+            if [ "$state" = "MERGED" ]; then
+              sha="$(gh pr view "$PR" --json mergeCommit --jq .mergeCommit.oid)"
+              echo "sha=$sha" >> "$GITHUB_OUTPUT"
+              echo "Merged as $sha."
+              exit 0
+            fi
+            if [ "$state" = "CLOSED" ]; then
+              echo "::error::Release pull request #$PR was closed without merging: no release."
+              exit 1
+            fi
+            # main moved under us (another merge): bring the branch up to
+            # date, or the "up to date" rule keeps the PR waiting forever.
+            if [ "$(gh pr view "$PR" --json mergeStateStatus --jq .mergeStateStatus)" = "BEHIND" ]; then
+              gh pr update-branch "$PR" || true
+            fi
+            sleep 15
+          done
+          echo "::error::Release pull request #$PR did not merge within 30 minutes. Look at its checks; the next daily run picks it up again."
+          exit 1
+
+      - name: Tag the merge commit (this starts release.yml)
+        if: steps.due.outputs.due == 'true'
+        env:
+          NEXT: ${{ steps.due.outputs.next }}
+          SHA: ${{ steps.merged.outputs.sha }}
+        run: |
+          git fetch origin main
+          git tag "v${NEXT}" "$SHA"
+          git push origin "v${NEXT}"
+          echo "Tagged v${NEXT} at ${SHA}: release.yml builds, verifies and publishes it." >> "$GITHUB_STEP_SUMMARY"

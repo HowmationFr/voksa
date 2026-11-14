@@ -41,7 +41,7 @@ These rules are non-negotiable: CI enforces some of them, reviewers enforce the 
 5. Open the PR and fill in the template. CI then runs: lint, typecheck, unit tests, build, Windows/macOS/Linux packaging and a real boot smoke test on all three OSes.
 6. A maintainer reviews; once CI is green and the review approved, the PR is merged into `main`.
 
-Releases are cut by maintainers from `main`: a `vX.Y.Z` tag (derived from the `package.json` version) triggers the release workflow, which builds and signs the Windows, macOS and Linux artifacts into a draft release that a maintainer then publishes manually.
+Releases are cut from `main`: a `vX.Y.Z` tag (derived from the `package.json` version) triggers the release workflow, which builds and signs the Windows, macOS and Linux artifacts into a draft release. A release tagged by a maintainer is then published manually. Patch releases that carry dependency updates (Electron above all) are cut and published automatically; [.github/AUTOMATION.md](.github/AUTOMATION.md) describes that chain and how to pause it.
 
 ## License
 

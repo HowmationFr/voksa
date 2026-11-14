@@ -12,6 +12,10 @@ on:
 
 jobs:
   claude-review:
+    # Not on Dependabot's pull requests (GitHub gives them no access to the
+    # token: the job would only fail) nor on release pull requests (a version
+    # bump has nothing to review, and each review draws on the subscription).
+    if: github.actor != 'dependabot[bot]' && !startsWith(github.head_ref, 'release/')
     # Optional: Filter by PR author
     # if: |
     #   github.event.pull_request.user.login == 'external-contributor' ||

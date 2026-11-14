@@ -1,0 +1,73 @@
+# A red check on a Dependabot pull request used to mean a security fix stuck
+# in silence. Lived: the Electron 45.2.1 bump waited six days because the
+# Windows smoke job failed once; nobody re-ran it, nothing said so, and it was
+# only unblocked by the next Electron release superseding it.
+#
+# So, when CI fails on a Dependabot pull request:
+#   - first failure: re-run the failed jobs once. The end-to-end smoke suite
+#     drives a real browser on three OSes and is occasionally flaky; a retry
+#     settles most of those, and auto-merge then proceeds as usual.
+#   - still red after the retry: open ONE issue naming the pull request, so
+#     the maintainer is told instead of finding out a week later.
+#
+# Deliberately NO agent here: a fix written by an LLM and pushed onto a branch
+# that auto-merges, then auto-releases, would reach users with no human having
+# read it. A real breakage is for a person (who can ask @claude in the pull
+# request, see claude.yml).
+name: Dependabot CI retry
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  actions: write
+  issues: write
+  pull-requests: read
+
+jobs:
+  retry:
+    name: Retry once, then tell the maintainer
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+    steps:
+      - name: First failure, re-run the failed jobs
+        if: github.event.workflow_run.run_attempt == 1
+        run: |
+          gh run rerun "$RUN_ID" --failed -R "$GITHUB_REPOSITORY"
+          echo "Re-running the failed jobs of run $RUN_ID (attempt 1 failed)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Still red, open an issue (once per pull request)
+        if: github.event.workflow_run.run_attempt > 1
+        run: |
+          if [ -z "$PR" ]; then
+            echo "No pull request attached to run $RUN_ID: nothing to report."
+            exit 0
+          fi
+          title="CI is red on Dependabot pull request #${PR}"
+          existing="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" -R "$GITHUB_REPOSITORY" \
+              --body "Still failing after another run (attempt ${ATTEMPT}): ${RUN_URL}"
+            exit 0
+          fi
+          pr_title="$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json title --jq .title)"
+          {
+            echo "@${GITHUB_REPOSITORY_OWNER} CI failed twice in a row on #${PR} (\`${pr_title}\`), so it will not merge on its own."
+            echo
+            echo "- Failed run: ${RUN_URL}"
+            echo "- If it is an Electron bump, users stay on the previous Chromium until this is sorted out."
+            echo
+            echo "What usually works: read the failed job, fix it on the pull request's branch, or comment \`@dependabot recreate\` once \`main\` is fixed. Close this issue when the pull request is merged or superseded."
+          } > "$RUNNER_TEMP/issue.md"
+          gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body-file "$RUNNER_TEMP/issue.md"

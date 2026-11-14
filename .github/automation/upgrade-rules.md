@@ -29,8 +29,15 @@ you could not.
   before. List every test file you changed in the report, with what changed
   and why. The workflow counts the unit tests that pass before and after you:
   fewer afterwards holds the merge.
-- **Leave the other judges alone.** The end-to-end suite (`scripts/smoke.mjs`,
-  `scripts/fixtures/`), the scripts CI judges a pull request with
+- **The same goes for the end-to-end suite** (`scripts/smoke.mjs`,
+  `scripts/fixtures/`). Adapt it when the new major changes what it drives (a
+  renamed event, a different window, a new permission flow); never to hide a
+  failure. It is the only check of what Stream Mode really paints, and your
+  changes to it ship unread: a scenario you edit must still fail if the thing
+  it guards breaks. Never remove or rename a scenario: the workflow compares
+  the `pass('NAME')` calls before and after you, and one that disappeared
+  holds the merge. Report each scenario you touched and why.
+- **Leave the other judges alone.** The scripts CI judges a pull request with
   (`scripts/check-packaged.mjs`, `scripts/version-only-diff.mjs`), the
   configuration of a check (`eslint.config.mjs`, `tsconfig*.json`,
   `vitest.config.ts`) and the `scripts` section of `package.json`. An upgrade
@@ -97,9 +104,9 @@ Verdict: hold
 ```
 
 Say `ready` only if all of this is true: every check above passed in this
-session; every unit test you changed still checks what it checked before, and
-none was deleted or skipped; you touched none of the other judges listed
-above; nothing in the release notes is left that you did not understand or
+session; every unit test and every end-to-end scenario you changed still
+checks what it checked before, and none was deleted or skipped; you touched
+none of the other judges listed above; nothing in the release notes is left that you did not understand or
 could not check against the code; you would be
 comfortable seeing this change reach every user tonight without anyone having
 read it. Anything else is `hold`. A `hold` is not a failure: it sends the

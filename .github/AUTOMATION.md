@@ -26,10 +26,27 @@ everything on `main`, which only ever receives pull requests that passed the
 full CI, and only ever moves the last number of the version (0.9.1 becomes
 0.9.2), whatever was updated.
 
+### GitHub Actions
+
+The actions the workflows use (`actions/checkout`, `actions/setup-node`...)
+are updated by Dependabot too, once a week, in one grouped pull request that
+merges on its own like the others, **majors included**: an action is
+referenced by its major (`actions/checkout@v7`), so nearly every update of one
+is a major, and waiting for a person each time meant waiting every time. CI
+on the pull request is what vouches for it, which covers `ci.yml` only: a new
+major that breaks `release.yml` or one of the scheduled workflows is found
+when that workflow next runs and fails (GitHub mails the failed run).
+
+One exception waits for a person: a major of `anthropics/claude-code-action`,
+the action that runs the upgrade agent. What the agent is allowed to do is
+passed to it as inputs, and a new major can rename or reinterpret them
+without any check noticing. It has its own pull request, so it never holds
+the other actions back.
+
 ## Major versions
 
-Dependabot ignores major versions on purpose: a major usually needs code
-changes. Those are made by an agent (Claude, on the maintainer's
+Dependabot ignores major versions of npm packages on purpose: a major usually
+needs code changes. Those are made by an agent (Claude, on the maintainer's
 subscription), one upgrade at a time:
 
 | What | Workflow | When |

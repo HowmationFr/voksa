@@ -3,8 +3,21 @@
 # green (typecheck, lint, tests, packaging and the CDP smoke suite on all
 # three OS). A red check leaves the PR open for a human.
 #
-# Scope: patch and minor version bumps only. Electron majors never reach here
-# (excluded in dependabot.yml); any other major stays open for review.
+# What merges on its own:
+#   - patch and minor updates, of npm packages and of GitHub Actions;
+#   - MAJOR updates of GitHub Actions. An action is referenced by its major
+#     (actions/checkout@v7), so nearly every update of one is a "major":
+#     waiting for a person each time meant waiting every time.
+#
+# What waits for a person:
+#   - a major of anthropics/claude-code-action, the action that runs the
+#     upgrade agent. What the agent may do is passed to it as inputs
+#     (agent-upgrade.yml), and a new major can rename or reinterpret an input
+#     without any check noticing. dependabot.yml gives it its own pull
+#     request so it never holds the other actions back;
+#   - anything this job cannot classify.
+# Majors of npm packages never get here: dependabot.yml ignores them, and the
+# upgrade agent carries them out (see .github/AUTOMATION.md).
 #
 # Requires, on the GitHub side: "Allow auto-merge" enabled in the repository
 # settings (Settings > General > Pull Requests).
@@ -26,9 +39,34 @@ jobs:
         uses: dependabot/fetch-metadata@v3
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
-      - name: Enable auto-merge for patch/minor updates
-        if: steps.metadata.outputs.update-type == 'version-update:semver-patch' || steps.metadata.outputs.update-type == 'version-update:semver-minor'
-        run: gh pr merge --auto --squash "$PR_URL"
+      - name: Enable auto-merge when the update may merge on its own
+        id: decide
         env:
+          # dependabot/github_actions/..., dependabot/npm_and_yarn/...
+          HEAD_REF: ${{ github.head_ref }}
+          # The highest change in the pull request when it groups several.
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          # Comma-separated.
+          DEPENDENCIES: ${{ steps.metadata.outputs.dependency-names }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          merge=no
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch | version-update:semver-minor)
+              merge=yes ;;
+            version-update:semver-major)
+              case "$HEAD_REF" in dependabot/github_actions/*) merge=yes ;; esac ;;
+          esac
+          # Exact names: "a, b" becomes ",a,b,".
+          names=",$(printf '%s' "$DEPENDENCIES" | tr -d ' '),"
+          case "$names" in
+            *,anthropics/claude-code-action,*)
+              if [ "$UPDATE_TYPE" = "version-update:semver-major" ]; then merge=no; fi ;;
+          esac
+          if [ "$merge" = yes ]; then
+            gh pr merge --auto --squash "$PR_URL"
+            echo "Merges on its own once CI is green (${UPDATE_TYPE}: ${DEPENDENCIES})." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Waits for a person (${UPDATE_TYPE:-unknown update type}: ${DEPENDENCIES:-unknown dependencies})." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

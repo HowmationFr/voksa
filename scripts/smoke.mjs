@@ -65,8 +65,10 @@
 //      wiring-only checks (loudly logged) when the environment renders no
 //      audio at all (headless CI without an audio device).
 //  22. PANIC: voksa.stream.panic() (the same action the global hotkey fires)
-//      curtains the window, arms Stream Mode, and reports active; the second
-//      call restores the curtain but leaves the stream armed on purpose.
+//      covers the window over a real page, arms Stream Mode, and reports
+//      active; the cover HOLDS (past the 6s timer of a navigation curtain, and
+//      over a tab opened meanwhile) until the second call, which lifts it but
+//      leaves the stream armed on purpose.
 //  23. CAPTURE HANDSHAKE: driving the chrome-UI picker path (debug seam)
 //      raises OUR picker, picking a Voksa source arms Stream Mode before the
 //      source is delivered, and the delivered id is the one picked.
@@ -786,6 +788,15 @@ const POISON_STATE_EXPR = `(() => {
 // Evaluated on the CHROME UI target: the Stream Mode curtain is rendered by
 // Chrome.tsx (data-testid="curtain"), never inside the page webContents.
 const CURTAIN_UP_EXPR = `document.querySelector('[data-testid="curtain"]') !== null`;
+
+// The PANIC cover must actually SPAN the page area. The element alone proves
+// nothing: with the chrome view collapsed to the toolbar strip (the overlay
+// key lost, say) its container is 0px high and the node still exists, over a
+// page in plain sight.
+const COVER_SPANS_PAGE_EXPR = `(() => {
+  const el = document.querySelector('[data-testid="curtain"]');
+  return !!el && el.getBoundingClientRect().height > 100;
+})()`;
 
 // Scenario 29: one fresh RTCPeerConnection per call (the IP handling policy
 // only binds connections created after it is set), NO ICE server (no STUN
@@ -2251,6 +2262,20 @@ async function main() {
   // --- 22. PANIC ------------------------------------------------------------------
   // Driven through the IPC action (the hotkey is just another trigger of the
   // same toggle; CDP cannot synthesize OS-level global shortcuts).
+  //
+  // Over a REAL page, on purpose: an internal page runs no masker, and it is
+  // the masker's ready (sent when panic arms Stream Mode) that used to drop
+  // the cover within milliseconds. The assertion would be vacuous without it.
+  const panicTabId = await ui.evaluate(
+    `window.voksa.tabs.create(${J(`${probe.origin}/page.html`)})`,
+  );
+  await waitFor(
+    'panic probe page loaded',
+    async () =>
+      (await ui.evaluate(`window.voksa.tabs.list()`)).find((t) => t.id === panicTabId)
+        ?.isLoading === false,
+    STREAM_TIMEOUT_MS,
+  );
   if (await ui.evaluate(CURTAIN_UP_EXPR)) {
     throw new Error('a curtain is already up before panic: the assertion below would be vacuous');
   }
@@ -2259,8 +2284,8 @@ async function main() {
     throw new Error(`panic() did not report active: ${JSON.stringify(panicOn)}`);
   }
   await waitFor(
-    'panic curtain up over the active tab',
-    async () => ui.evaluate(CURTAIN_UP_EXPR),
+    'panic cover up over the active tab',
+    async () => ui.evaluate(COVER_SPANS_PAGE_EXPR),
     STREAM_TIMEOUT_MS,
     'panic did not curtain the window (TabManager.panicCover)',
   );
@@ -2268,6 +2293,30 @@ async function main() {
   if (!armed?.enabled) {
     throw new Error('panic did not arm Stream Mode');
   }
+  // THE COVER HOLDS. It is not a navigation curtain: nothing but the second
+  // press may lift it. Waited past the 6s fail-to-blank timer of a navigation
+  // curtain, which is exactly what used to lift it (lived: panic uncovered
+  // itself after six seconds while still reporting active).
+  await sleep(6_500);
+  if (!(await ui.evaluate(COVER_SPANS_PAGE_EXPR))) {
+    throw new Error('the panic cover lifted by itself: it must hold until panic is released');
+  }
+  // A tab opened while panic is up is covered too (the cover is the window's,
+  // not a tab's). A real page again: an internal one has no page view to hide.
+  const lateTabId = await ui.evaluate(
+    `window.voksa.tabs.create(${J(`${probe.origin}/page.html?late`)})`,
+  );
+  await waitFor(
+    'tab opened during panic loaded',
+    async () =>
+      (await ui.evaluate(`window.voksa.tabs.list()`)).find((t) => t.id === lateTabId)
+        ?.isLoading === false,
+    STREAM_TIMEOUT_MS,
+  );
+  if (!(await ui.evaluate(COVER_SPANS_PAGE_EXPR))) {
+    throw new Error('a tab opened during panic is not covered');
+  }
+  await ui.evaluate(`window.voksa.tabs.close(${J(lateTabId)})`);
   const panicOff = await ui.evaluate(`window.voksa.stream.panic()`);
   if (panicOff?.active !== false) {
     throw new Error(`second panic() did not restore: ${JSON.stringify(panicOff)}`);
@@ -2284,6 +2333,7 @@ async function main() {
     throw new Error('panic restore disarmed Stream Mode: it must stay armed until turned off manually');
   }
   await ui.evaluate(`window.voksa.stream.update({ enabled: false })`);
+  await ui.evaluate(`window.voksa.tabs.close(${J(panicTabId)})`);
   pass('PANIC');
 
   // --- 23. CAPTURE HANDSHAKE ------------------------------------------------------

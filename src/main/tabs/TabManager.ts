@@ -16,6 +16,7 @@ import type { SessionWindow, SessionTab } from '../storage/session';
 import { computeTabBounds } from './bounds';
 import { getSettings, setSettings } from '../storage/settings';
 import { normalizeInput } from '../../shared/urlUtils';
+import { fullscreenLayoutActive, tabOnScreen, type LayoutState } from './panicLayout';
 import { defaultEngine } from '../search/engines';
 import { sameMaskingConfig, type StreamModeConfig } from '../../shared/streamConfig';
 import { getStreamMode } from '../stream-mode/StreamModeController';
@@ -350,6 +351,13 @@ export class TabManager extends EventEmitter {
     if (idx === -1) return;
     const [tab] = this.tabs.splice(idx, 1);
     const wasActive = this.activeId === id;
+    // Its listeners come off below, so its page can never report leaving
+    // fullscreen: forget it here, or the layout would stay (or come back)
+    // fullscreen over a tab that never asked.
+    if (this.fullscreenTabId === id) {
+      this.fullscreenTabId = null;
+      this.applyHtmlFullscreen();
+    }
 
     if (tab.url && tab.url !== 'voksa://newtab') {
       this.closedStack.push({ url: tab.url, title: tab.title });
@@ -430,6 +438,9 @@ export class TabManager extends EventEmitter {
     if (tab.isDiscarded) {
       void this.reviveTab(tab);
     }
+    // The fullscreen layout belongs to the tab that asked for it: off when
+    // another one comes in front, back when that one returns.
+    this.applyHtmlFullscreen();
     this.applyActiveBounds();
     this.bringActiveToFront();
     const wc = tab.view?.webContents;
@@ -518,24 +529,35 @@ export class TabManager extends EventEmitter {
   // --- Panic (system-wide hotkey; see stream-mode/panic.ts) ------------------
 
   /**
-   * Cover every tab with a solid curtain and hard-mute everything. The mute
-   * goes through each tab's single audio writer with the global panic flag
-   * already up, so nothing that re-applies audio state mid-panic (a revive, a
-   * guard sweep) can unmute behind the curtain.
+   * Cover this window and hard-mute everything. The cover is the curtain
+   * controller's PANIC cover, not a navigation curtain per tab: it holds until
+   * panicUncover, whatever the pages do meanwhile (see CurtainController), and
+   * being window-wide it also covers a tab created, revived or switched to
+   * while panic is up. The mute goes through each tab's single audio writer
+   * with the global panic flag already up, so nothing that re-applies audio
+   * state mid-panic (a revive, a guard sweep) can unmute behind the cover.
    */
   panicCover(): void {
-    for (const t of this.tabs) {
-      if (t.view) void this.curtain.raise(t.id, t.view, 'solid');
-      t.applyAudioMuted();
-    }
+    this.curtain.setPanic(true);
+    // The cover is painted by the chrome view, which the fullscreen layout
+    // hides (window.ts): fall back to the normal layout while panic is up.
+    this.applyHtmlFullscreen();
+    // And take every page view off screen. The panel is painted by another
+    // process (the chrome UI), which may be a frame late, minimized or
+    // reloading; with no page behind it, late means "window background", not
+    // "the page".
+    this.applyActiveBounds();
+    for (const t of this.tabs) t.applyAudioMuted();
   }
 
-  /** Drop the panic curtains and restore each tab's own audio state. */
+  /** Lift the panic cover and restore each tab's own audio state. */
   panicUncover(): void {
-    for (const t of this.tabs) {
-      this.curtain.drop(t.id);
-      t.applyAudioMuted();
-    }
+    this.curtain.setPanic(false);
+    // A page that is still in fullscreen, and still in front, gets its layout
+    // back; then the active tab returns on screen.
+    this.applyHtmlFullscreen();
+    this.applyActiveBounds();
+    for (const t of this.tabs) t.applyAudioMuted();
   }
 
   // --- Memory Saver ---------------------------------------------------------
@@ -567,6 +589,10 @@ export class TabManager extends EventEmitter {
     if (this.hasOpenPopup(tab.id)) return false;
     const wc = tab.view?.webContents;
     if (!wc || wc.isDestroyed()) return false;
+
+    // A freed renderer is not in fullscreen any more, and (listeners detached
+    // in step 4) could never say so.
+    if (this.fullscreenTabId === tab.id) this.fullscreenTabId = null;
 
     // 1. Snapshot the session history while the renderer is still alive.
     tab.captureNavigation();
@@ -988,13 +1014,43 @@ export class TabManager extends EventEmitter {
     if (first) this.setActive(first.id);
   }
 
+  /** The layout in effect: the tab fills the window and the chrome is hidden. */
   private htmlFullscreen = false;
+  /**
+   * The tab whose PAGE is in HTML fullscreen (enter/leave-html-full-screen),
+   * panic or not. A tab id, not a flag: see fullscreenLayoutActive.
+   */
+  private fullscreenTabId: string | null = null;
 
-  /** Enter/leave HTML5 (video) fullscreen: chrome hidden, tab fills window. */
-  setHtmlFullscreen(on: boolean): void {
-    this.htmlFullscreen = on;
+  /** A tab's page entered or left HTML5 (video) fullscreen. */
+  private setHtmlFullscreen(tabId: string, on: boolean): void {
+    if (on) this.fullscreenTabId = tabId;
+    else if (this.fullscreenTabId === tabId) this.fullscreenTabId = null;
+    this.applyHtmlFullscreen();
+  }
+
+  private layoutState(): LayoutState {
+    return {
+      activeTabId: this.activeId,
+      fullscreenTabId: this.fullscreenTabId,
+      panic: this.curtain.isPanic(),
+    };
+  }
+
+  /**
+   * Bring the window layout in line with what the active page asked for
+   * (chrome hidden, tab fills the window), EXCEPT under the panic cover. The
+   * page's own fullscreen state is left alone; the layout follows it again
+   * once panic is released, if that tab is still the one in front. Called
+   * from everything that can change the answer: the page's enter/leave
+   * events, a tab switch, the tab going away, panic going up or down.
+   */
+  private applyHtmlFullscreen(): void {
+    const next = fullscreenLayoutActive(this.layoutState());
+    if (next === this.htmlFullscreen) return;
+    this.htmlFullscreen = next;
     this.applyActiveBounds();
-    this.emit('html-fullscreen', on);
+    this.emit('html-fullscreen', next);
   }
 
   private applyActiveBounds(): void {
@@ -1008,10 +1064,13 @@ export class TabManager extends EventEmitter {
     } else {
       bounds = computeTabBounds(this.window, this.chromeBounds);
     }
+    const layout = this.layoutState();
     for (const t of this.tabs) {
       // A discarded tab has no view: nothing to lay out (and nothing painting).
       if (!t.view || t.view.webContents.isDestroyed()) continue;
-      if (t.id === active.id) {
+      // Under panic no tab is on screen, the active one included: the cover
+      // then has nothing behind it but the window background.
+      if (tabOnScreen(t.id, layout)) {
         t.setBounds(bounds);
       } else {
         t.setBounds({ x: -100000, y: -100000, width: bounds.width, height: bounds.height });
@@ -1151,8 +1210,8 @@ export class TabManager extends EventEmitter {
     }) as (...args: never[]) => void);
 
     // HTML5 video fullscreen → hide chrome, tab fills the window.
-    on('enter-html-full-screen', (() => this.setHtmlFullscreen(true)) as (...args: never[]) => void);
-    on('leave-html-full-screen', (() => this.setHtmlFullscreen(false)) as (...args: never[]) => void);
+    on('enter-html-full-screen', (() => this.setHtmlFullscreen(tab.id, true)) as (...args: never[]) => void);
+    on('leave-html-full-screen', (() => this.setHtmlFullscreen(tab.id, false)) as (...args: never[]) => void);
 
     // Find results → forward to the chrome UI find bar.
     on('found-in-page', ((

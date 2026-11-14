@@ -1049,6 +1049,40 @@ async function connectPageTarget(url, label, hint) {
   return page;
 }
 
+/** Whether a page target (tab or window) is currently listed under `url`. */
+async function isListed(url) {
+  return (await listTargets()).some((t) => t.type === 'page' && t.url === url);
+}
+
+/**
+ * Close a window from inside (window.close()) and wait until its target is
+ * gone. What is asserted is the OUTCOME, never the reply to the evaluate that
+ * closes it: that reply races the close it triggers, and when the socket goes
+ * down first the evaluate rejects although the window did exactly what was
+ * asked. Lived on all three CI OSes, at this very step of several scenarios:
+ * "CDP socket closed (popup level 2); no page target listed under ...". A
+ * window that does NOT close still fails, on the wait below.
+ */
+async function closeFromInside(page, hint) {
+  try {
+    if (await page.attach()) {
+      await page.client.evaluate(`setTimeout(() => window.close(), 0), true`);
+    }
+  } catch (err) {
+    // Kept visible: how often this happens is the only data on that race.
+    console.log(`[smoke] note: ${page.label} did not answer its own close (${err.message})`);
+  }
+  await waitFor(
+    `${page.label} closed`,
+    async () => !(await isListed(page.url)),
+    STEP_TIMEOUT_MS,
+    hint,
+  );
+}
+
+/** A window that may close by itself did, before it could be judged. */
+class PopupGone extends Error {}
+
 /**
  * Poll a popup document loaded under Stream Mode until it is masked AND
  * revealed, failing on the FIRST observation of raw text a viewer could see
@@ -1072,6 +1106,12 @@ async function awaitMaskedPopup(page, opts) {
       // PageClient already followed it): not a verdict, sample again. A popup
       // that never comes back still fails below, on the deadline.
       lastSampleError = err.message;
+      // Except a window that is ALLOWED to close by itself (opts.mayVanish):
+      // once it is gone, waiting out the deadline teaches nothing. The caller
+      // decides what its disappearance means.
+      if (opts.mayVanish && !(await isListed(page.url))) {
+        throw new PopupGone(`${opts.label} went away before it settled (${err.message})`);
+      }
       await sleep(100);
       continue;
     }
@@ -3251,17 +3291,8 @@ async function main() {
   }
   // Anti-vacuity: the refusal was about the chain. Once it is closed, the very
   // same background tab is discardable again.
-  await chain2.evaluate(`setTimeout(() => window.close(), 0), true`);
-  await chain1.evaluate(`setTimeout(() => window.close(), 0), true`);
-  await waitFor(
-    'popup chain closed',
-    async () =>
-      !(await listTargets()).some(
-        (t) => t.type === 'page' && (t.url === chain1Url || t.url === chain2Url),
-      ),
-    STEP_TIMEOUT_MS,
-    'window.close() did not tear the popups down',
-  );
+  await closeFromInside(chain2, 'window.close() did not tear the grandchild popup down');
+  await closeFromInside(chain1, 'window.close() did not tear the popup down');
   await waitFor(
     'the opener tab is discardable once its popups are gone',
     async () => (await ui.evaluate(`window.voksa.tabs.discard(${J(chainTabId)})`)) === true,
@@ -3322,7 +3353,7 @@ async function main() {
     hint: 'createWindow (src/main/extensions/webstore.ts) must build its window with popupWebPreferences()',
   });
   await assertExtensionApi(vaultWindow, 'chrome.windows.create popup');
-  await vaultWindow.evaluate(`setTimeout(() => window.close(), 0), true`);
+  await closeFromInside(vaultWindow, 'a chrome.windows.create popup survived window.close()');
 
   // (b) chrome.windows.create with a web page (an extension's own sign-in
   //     window): masked, iframe guarded, and no opener (Chrome gives it none).
@@ -3344,19 +3375,12 @@ async function main() {
       'createWindow must build its window with popupWebPreferences() and have it adopted (frame guard) ' +
       'before its first load: TabManager.adoptPopup',
   });
-  await extWebWindow.evaluate(`setTimeout(() => window.close(), 0), true`);
-  // Both windows must be GONE before (c): an action popup closes as soon as it
+  await closeFromInside(extWebWindow, 'a chrome.windows.create popup survived window.close()');
+  // Both windows are GONE before (c): an action popup closes as soon as it
   // loses focus to another Voksa window (electron-chrome-extensions
   // PopupView.maybeClose, Chrome's behaviour too), and on macOS a window
   // closing hands the focus back asynchronously, so a close still in flight
   // can take it from the popup that just opened.
-  await waitFor(
-    'chrome.windows.create popups closed',
-    async () =>
-      !(await listTargets()).some((t) => t.type === 'page' && [vaultWindowUrl, extWebUrl].includes(t.url)),
-    STEP_TIMEOUT_MS,
-    'a chrome.windows.create popup survived window.close()',
-  );
   await sleep(300); // let the OS settle the focus the closed windows released
 
   // (c) The toolbar action popup, opened through the real UI path (the
@@ -3368,32 +3392,61 @@ async function main() {
     STEP_TIMEOUT_MS,
     'the chrome UI renders no action button for the fixture (ExtensionActions.tsx)',
   );
-  await ui.evaluate(`document.querySelector(${J(actionSelector)}).click()`);
-  const actionPopup = await connectPageTarget(
-    vaultUrl,
-    'extension action popup',
-    'clicking the action button opened no popup (electron-chrome-extensions browserAction.activate)',
-  );
-  await awaitMaskedPopup(actionPopup, {
-    label: 'extension action popup',
-    marker: VAULT_MARKER,
-    email: VAULT_EMAIL,
-    shown: true,
-    hint:
-      'the action popup has no preload of its own: the session preload (src/preload/extensionPopup.ts) must ' +
-      'run page.js there, and the gate (stream-mode/extensionPopupGate.ts) must show it once proven',
-  });
-  await assertExtensionApi(actionPopup, 'action popup');
-  await actionPopup.evaluate(`setTimeout(() => window.close(), 0), true`);
-  await waitFor(
-    'extension windows closed',
-    async () =>
-      !(await listTargets()).some(
-        (t) => t.type === 'page' && [vaultUrl, vaultWindowUrl, extWebUrl].includes(t.url),
-      ),
-    STEP_TIMEOUT_MS,
-    'an extension window survived window.close()',
-  );
+  // The pause above is a courtesy, not a guarantee: on a busy macOS runner
+  // the focus still arrives late, right after the popup is shown, and the
+  // library closes it (lived, repeatedly: "CDP socket closed (extension action
+  // popup)"). A popup that lost the focus is not what this scenario judges,
+  // so it is opened again. What IS judged stays strict: a raw frame, a broken
+  // extension API, a popup that never settles or that the app itself destroyed
+  // (the gate says so on the console) fail at once, and so does a popup that
+  // keeps closing.
+  const ACTION_POPUP_ATTEMPTS = 5;
+  let actionPopup = null;
+  for (let attempt = 1; ; attempt += 1) {
+    const outputBefore = output.length;
+    // Only when none is open: a second click on an open popup closes it.
+    if (!(await isListed(vaultUrl))) {
+      await ui.evaluate(`document.querySelector(${J(actionSelector)}).click()`);
+    }
+    actionPopup = await connectPageTarget(
+      vaultUrl,
+      'extension action popup',
+      'clicking the action button opened no popup (electron-chrome-extensions browserAction.activate)',
+    );
+    try {
+      await awaitMaskedPopup(actionPopup, {
+        label: 'extension action popup',
+        marker: VAULT_MARKER,
+        email: VAULT_EMAIL,
+        shown: true,
+        mayVanish: true,
+        hint:
+          'the action popup has no preload of its own: the session preload (src/preload/extensionPopup.ts) must ' +
+          'run page.js there, and the gate (stream-mode/extensionPopupGate.ts) must show it once proven',
+      });
+      await assertExtensionApi(actionPopup, 'action popup');
+      break;
+    } catch (err) {
+      const lostFocus =
+        (err instanceof PopupGone || /^CDP socket/.test(err.message)) &&
+        !(await isListed(vaultUrl)) &&
+        !output.slice(outputBefore).includes('[stream] extension popup destroyed');
+      if (!lostFocus) throw err;
+      if (attempt >= ACTION_POPUP_ATTEMPTS) {
+        throw new Error(
+          `the action popup closed by itself ${ACTION_POPUP_ATTEMPTS} times in a row before it could be checked ` +
+            `(last: ${err.message}). It closes when another Voksa window takes the focus: something keeps ` +
+            'taking it, or the popup no longer survives being shown',
+        );
+      }
+      console.log(
+        `[smoke] note: the action popup closed by itself before it could be checked ` +
+          `(attempt ${attempt} of ${ACTION_POPUP_ATTEMPTS}: ${err.message}), opening it again`,
+      );
+      await sleep(300);
+    }
+  }
+  await closeFromInside(actionPopup, 'the action popup survived window.close()');
   await ui.evaluate(`window.voksa.tabs.close(${J(extDriverTabId)})`);
 
   // (d) An extension page EMBEDDED in a web page (a password manager's inline

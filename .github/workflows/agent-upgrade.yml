@@ -1,0 +1,367 @@
+# One major upgrade, start to finish, with nobody in the loop. Called by
+# electron-major.yml (Electron) and dependency-majors.yml (everything else);
+# never triggered on its own.
+#
+#   1. branch, install, optional scripted bump;
+#   2. Claude adapts the code, following the playbook it is pointed at;
+#   3. the workflow RE-RUNS the checks itself (it does not take the agent's
+#      word for them);
+#   4. commit, push, pull request;
+#   5. the pull request is set to merge on its own once CI is green on all
+#      three OSes... unless something says a person should look first.
+#
+# What holds the merge (the pull request stays open, the maintainer is told
+# why in a comment):
+#   - the agent session did not finish cleanly;
+#   - a check fails on this runner;
+#   - the package is not actually at the target major;
+#   - the agent's own verdict is not "ready" (its report must start with the
+#     line `Verdict: ready`; anything else, or no report, is a hold);
+#   - fewer unit tests pass after the upgrade than before it (a test deleted
+#     or skipped to get to green, a new major of the test runner quietly
+#     running less);
+#   - the agent changed the end-to-end suite, the configuration of a check
+#     (the linter's, the type checker's, the test runner's), a script CI runs
+#     to judge a pull request, or the npm scripts that launch the checks. "CI
+#     is green" only means something if what judges the change is not part of
+#     the change: an upgrade that needed its judges edited gets one human
+#     click instead of none.
+#
+# Editing UNIT TESTS does not hold the merge: a major upgrade needs them
+# adapted nearly every time, and waiting for a person each time would make
+# none of this automatic. The count of passing tests is what is left to watch
+# them, and .github/AUTOMATION.md says plainly what that does not catch.
+#
+# A retry starts from scratch: a pull request left by a previous attempt has
+# its auto-merge switched off before anything new is pushed to it.
+#
+# Division of labour, on purpose: the agent only edits files and runs the
+# project's commands. Branch, commit, push, pull request and merge are plain
+# workflow steps, so they do not depend on what a model decides to do, and the
+# token that can push is never in the agent's environment.
+name: Agent upgrade
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: npm package to upgrade
+        type: string
+        required: true
+      from:
+        description: Its current major
+        type: string
+        required: true
+      to:
+        description: The major to upgrade to
+        type: string
+        required: true
+      branch:
+        description: Branch to prepare the upgrade on
+        type: string
+        required: true
+      playbook:
+        description: Path of the playbook the agent must follow
+        type: string
+        required: true
+      install:
+        description: Command that performs the bump before the agent starts (empty, the agent does it)
+        type: string
+        default: ''
+      issue:
+        description: Tracking issue to report to (optional)
+        type: string
+        default: ''
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      AUTOMATION_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    name: Upgrade ${{ inputs.package }} ${{ inputs.from }} → ${{ inputs.to }}
+    runs-on: ubuntu-latest
+    # A major upgrade is a long session; the cap only stops a runaway.
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      # The Claude action authenticates as its GitHub App through OIDC.
+      id-token: write
+    env:
+      PACKAGE: ${{ inputs.package }}
+      FROM: ${{ inputs.from }}
+      TO: ${{ inputs.to }}
+      BRANCH: ${{ inputs.branch }}
+      PLAYBOOK: ${{ inputs.playbook }}
+      ISSUE: ${{ inputs.issue }}
+    steps:
+      - name: Both secrets must be configured
+        env:
+          AUTOMATION_TOKEN: ${{ secrets.AUTOMATION_TOKEN }}
+          CLAUDE_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          missing=0
+          [ -n "$AUTOMATION_TOKEN" ] || { echo "::error::The AUTOMATION_TOKEN secret is missing (see .github/AUTOMATION.md)."; missing=1; }
+          [ -n "$CLAUDE_TOKEN" ] || { echo "::error::The CLAUDE_CODE_OAUTH_TOKEN secret is missing (see .github/AUTOMATION.md)."; missing=1; }
+          exit "$missing"
+      - uses: actions/checkout@v7
+        with:
+          # Nothing left in the git config for the agent to find: the push at
+          # the end brings its own credentials.
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Start the branch
+        id: start
+        env:
+          INSTALL: ${{ inputs.install }}
+        run: |
+          test -f "$PLAYBOOK" || { echo "::error::Playbook $PLAYBOOK does not exist."; exit 1; }
+          git switch -c "$BRANCH"
+          npm ci
+          # How many unit tests PASS today, before anything is touched.
+          # Compared after the upgrade: green checks mean less if a test was
+          # deleted or skipped on the way (skipped tests are not counted).
+          npx vitest run --reporter=json --outputFile="$RUNNER_TEMP/tests-before.json" > /dev/null 2>&1 || true
+          before="$(node -p "try { require(process.argv[1]).numPassedTests } catch { '' }" "$RUNNER_TEMP/tests-before.json")"
+          echo "tests=$before" >> "$GITHUB_OUTPUT"
+          echo "Unit tests passing before the upgrade: ${before:-unknown}"
+          if [ -n "$INSTALL" ]; then bash -c "$INSTALL"; fi
+      # Same reason as in ci.yml: the smoke suite must run with Electron's
+      # real sandbox, which Ubuntu's AppArmor default forbids.
+      - name: Allow unprivileged user namespaces (Electron sandbox)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # The judgment part. No model is pinned on purpose: a hard-coded model
+      # id is one more thing that goes stale; the action's default follows
+      # Claude Code's. continue-on-error: if the session dies (usage limit,
+      # outage), whatever was done still reaches a draft pull request instead
+      # of being thrown away.
+      - name: Adapt the code (Claude, following the playbook)
+        id: agent
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Upgrade the npm package `${{ inputs.package }}` from major ${{ inputs.from }} to major ${{ inputs.to }} in this repository.
+            Before anything else, read ${{ inputs.playbook }} and follow it to the letter: it says what to check, which commands to run, what you must not touch, and where to write your report.
+            Nobody reviews this before it ships: if the checks pass and your report starts with "Verdict: ready", the change is merged and released to users automatically. Say "Verdict: hold" whenever you are not sure.
+          # acceptEdits + an explicit list: what is not listed is refused (the
+          # default mode lets a safety review wave other calls through). The
+          # web is limited to where packages publish their release notes, so
+          # the agent reads changelogs, not arbitrary pages.
+          claude_args: |
+            --max-turns 400
+            --permission-mode acceptEdits
+            --allowedTools "Read,Edit,MultiEdit,Write,Glob,Grep,LS,WebFetch(domain:www.electronjs.org),WebFetch(domain:releases.electronjs.org),WebFetch(domain:github.com),WebFetch(domain:raw.githubusercontent.com),WebFetch(domain:www.npmjs.com),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(xvfb-run:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+
+      # Measured by the workflow, not reported by the agent.
+      - name: Re-run the checks
+        id: checks
+        env:
+          TESTS_BEFORE: ${{ steps.start.outputs.tests }}
+        run: |
+          failed=0
+          table="| Check (Linux runner) | Result |\n|---|---|\n"
+          check() {
+            name="$1"; shift
+            if "$@" > "$RUNNER_TEMP/check.log" 2>&1; then
+              table+="| \`$name\` | passed |\n"
+            else
+              table+="| \`$name\` | **FAILED** |\n"
+              failed=1
+              echo "::group::$name failed"; tail -n 60 "$RUNNER_TEMP/check.log"; echo "::endgroup::"
+            fi
+          }
+          at_target() {
+            installed="$(node -p "require('./package-lock.json').packages['node_modules/' + process.env.PACKAGE].version")"
+            echo "installed: $installed"
+            [ "${installed%%.*}" = "$TO" ]
+          }
+          check "$PACKAGE is at major $TO" at_target
+          check "npm run typecheck" npm run typecheck
+          check "npm run lint" npm run lint
+          check "npm test" npm test
+          check "npm run build" npm run build
+          check "node scripts/smoke.mjs" timeout 1200 xvfb-run -a node scripts/smoke.mjs
+          # The same count as before the upgrade, with whatever test runner
+          # is installed now. Unreadable (a new report format) counts as
+          # "unknown", which holds the merge.
+          npx vitest run --reporter=json --outputFile="$RUNNER_TEMP/tests-after.json" > /dev/null 2>&1 || true
+          after="$(node -p "try { require(process.argv[1]).numPassedTests } catch { '' }" "$RUNNER_TEMP/tests-after.json")"
+          table+="| unit tests passing | ${TESTS_BEFORE:-unknown} before, ${after:-unknown} after |\n"
+          printf '%b' "$table" > "$RUNNER_TEMP/checks.md"
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+          echo "tests=$after" >> "$GITHUB_OUTPUT"
+
+      - name: Commit, push, open the pull request, decide the merge
+        id: pr
+        env:
+          # Only here, after the agent is done: the agent step never has
+          # this token in its environment.
+          AUTOMATION_TOKEN: ${{ secrets.AUTOMATION_TOKEN }}
+          GH_TOKEN: ${{ secrets.AUTOMATION_TOKEN }}
+          AGENT_OUTCOME: ${{ steps.agent.outcome }}
+          CHECKS_FAILED: ${{ steps.checks.outputs.failed }}
+          TESTS_BEFORE: ${{ steps.start.outputs.tests }}
+          TESTS_AFTER: ${{ steps.checks.outputs.tests }}
+        run: |
+          # The report is the pull request's description, not a file to ship.
+          report="$RUNNER_TEMP/report.md"
+          if [ -f UPGRADE_REPORT.md ]; then mv UPGRADE_REPORT.md "$report"; else echo "_The agent left no report._" > "$report"; fi
+
+          # In the maintainer's name (the token owner's GitHub noreply
+          # address), set here because the action above configures its own.
+          login="$(gh api user --jq .login)"
+          id="$(gh api user --jq .id)"
+          git config user.name "$login"
+          git config user.email "${id}+${login}@users.noreply.github.com"
+          # The pushing token cannot update workflow files (the push would be
+          # refused), and the playbooks forbid touching .github/: whatever
+          # the agent wrote there is dropped, and said.
+          dropped=""
+          if [ -n "$(git status --porcelain -- .github)" ]; then
+            dropped="yes"
+            git restore --staged --worktree -- .github 2> /dev/null || true
+            git clean -fdq -- .github
+          fi
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::error::Nothing changed: the upgrade was not even started. No pull request."
+            exit 1
+          fi
+
+          # --- Should a person look before this merges? ---------------------
+          hold=""
+          draft=""
+          if [ "$AGENT_OUTCOME" != "success" ]; then
+            hold+="- the agent session did not finish cleanly (outcome: \`${AGENT_OUTCOME}\`)\n"; draft="--draft"
+          fi
+          if [ "$CHECKS_FAILED" != "0" ]; then
+            hold+="- a check fails on the runner (see the table below)\n"; draft="--draft"
+          fi
+          if [ "$(head -n 1 "$report" | tr -d '\r')" != "Verdict: ready" ]; then
+            hold+="- the agent's verdict is not \`ready\` (first line of its report)\n"
+          fi
+          # The agent may adapt unit tests; it may not get to green by deleting
+          # or skipping one. Fail closed: a count that is missing or not a
+          # number is a hold.
+          if ! [ "$TESTS_BEFORE" -gt 0 ] 2> /dev/null || ! [ "$TESTS_AFTER" -ge "$TESTS_BEFORE" ] 2> /dev/null; then
+            hold+="- fewer unit tests pass than before the upgrade, or the count could not be read (before: ${TESTS_BEFORE:-unknown}, after: ${TESTS_AFTER:-unknown}): a test was deleted, skipped, or no longer runs\n"
+          fi
+          if [ -n "$dropped" ]; then
+            hold+="- the agent edited files under \`.github/\`, which were discarded (see its report for what it wanted there)\n"
+          fi
+          # What judges the change must not be part of the change: the
+          # end-to-end suite, the scripts CI judges a pull request with, and
+          # the configuration of each check. Unit tests are NOT on this list,
+          # on the maintainer's decision: a new major changes the APIs they
+          # use nearly every time, so the agent adapts them and that alone
+          # waits for nobody. What watches them is the count of passing
+          # tests, compared above.
+          judges_changed="$(git diff --cached --name-only | grep -E '^scripts/(smoke|check-packaged|version-only-diff)\.mjs$|^scripts/fixtures/|^vitest\.config\.ts$|^eslint\.config\.mjs$|^tsconfig[^/]*\.json$' || true)"
+          if [ -n "$judges_changed" ]; then
+            hold+="- the agent changed the end-to-end suite, a script CI judges a pull request with, or the configuration of a check, so green checks do not vouch for it on their own:\n$(printf '%s\n' "$judges_changed" | sed 's/^/  - `/; s/$/`/')\n"
+          fi
+          # Same idea for the npm scripts: every check is launched through
+          # one ("test": "vitest run"), here and in CI. An upgrade that
+          # rewrites them is judged by commands it chose itself. HEAD is still
+          # the commit the branch started from. Unreadable counts as changed.
+          git show HEAD:package.json > "$RUNNER_TEMP/package-before.json"
+          if ! node -e 'const path = require("node:path"); const scripts = (file) => JSON.stringify(require(path.resolve(file)).scripts ?? {}); process.exit(scripts(process.argv[1]) === scripts(process.argv[2]) ? 0 : 1)' "$RUNNER_TEMP/package-before.json" package.json; then
+            hold+="- the agent changed the npm scripts in \`package.json\`, which is how every check is launched\n"
+          fi
+
+          # A retry reuses the pull request of the previous attempt, which may
+          # still be set to merge on its own. Take that back BEFORE anything
+          # new is pushed to it: whether THIS attempt may merge unattended is
+          # decided here, never inherited. If it cannot be taken back, stop
+          # now, with nothing pushed.
+          number="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            auto_merge="$(gh pr view "$number" --json autoMergeRequest --jq '.autoMergeRequest != null')"
+            if [ "$auto_merge" != "false" ]; then gh pr merge "$number" --disable-auto; fi
+          fi
+
+          title="chore(deps): upgrade ${PACKAGE} from ${FROM} to ${TO}"
+          git commit -m "$title"
+          # Explicit URL and no inherited auth header: whatever checkout or
+          # the action left in the git config, this push is the token's, so
+          # CI runs on it. --force only matters when an upgrade is retried.
+          git -c "http.https://github.com/.extraheader=" push --force \
+            "https://x-access-token:${AUTOMATION_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${BRANCH}"
+
+          {
+            echo "\`${PACKAGE}\` **${FROM} → ${TO}**, prepared by the upgrade agent (\`.github/workflows/agent-upgrade.yml\`)."
+            echo
+            if [ -n "$hold" ]; then
+              echo "> **Held for a person.** It will not merge on its own, because:"
+              printf '%b' "$hold" | sed 's/^/> /'
+            else
+              echo "> **Merges on its own** once CI is green on Windows, macOS and Linux. To stop it, close this pull request or turn off auto-merge."
+            fi
+            echo
+            echo "## Checks re-run by the workflow after the agent"
+            echo
+            cat "$RUNNER_TEMP/checks.md"
+            echo
+            echo "## Agent report"
+            echo
+            cat "$report"
+          } > "$RUNNER_TEMP/pr.md"
+
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --title "$title" --body-file "$RUNNER_TEMP/pr.md"
+            # The reused pull request may be the draft of a failed attempt,
+            # and a draft cannot merge.
+            if [ -z "$hold" ]; then gh pr ready "$number"; fi
+          else
+            url="$(gh pr create --base main --head "$BRANCH" $draft --title "$title" --body-file "$RUNNER_TEMP/pr.md")"
+            number="${url##*/}"
+          fi
+
+          if [ -z "$hold" ]; then
+            # Squash: one commit on main, in the maintainer's name. GitHub
+            # merges it when the required checks are green, never before.
+            gh pr merge "$number" --auto --squash
+            echo "Pull request #$number will merge on its own once CI is green." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Pull request #$number is held for a person." >> "$GITHUB_STEP_SUMMARY"
+            printf '%b' "$hold" > "$RUNNER_TEMP/hold.md"
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      # Said with the workflow's own token, as github-actions: GitHub does not
+      # notify you about a pull request opened under your own name, and a held
+      # upgrade must not sit there unnoticed.
+      - name: Tell the maintainer
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          if [ -f "$RUNNER_TEMP/hold.md" ]; then
+            {
+              echo "@${GITHUB_REPOSITORY_OWNER} this upgrade is **not** merging on its own:"
+              echo
+              cat "$RUNNER_TEMP/hold.md"
+              echo
+              echo "Review it and merge it by hand, or ask \`@claude\` here to fix what fails."
+            } > "$RUNNER_TEMP/comment.md"
+            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/comment.md"
+            state="is held for you (see the comment there)"
+          else
+            state="merges on its own once CI is green"
+          fi
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" -R "$GITHUB_REPOSITORY" --body "The upgrade is prepared in #${PR}; it ${state}."
+          fi

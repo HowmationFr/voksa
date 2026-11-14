@@ -17,7 +17,14 @@
 // `main` only receives pull requests that passed the full CI, so it is always
 // releasable.
 //
-// Usage: node scripts/release-due.mjs [--force]
+// Releases are SPACED: with RELEASE_MIN_DAYS set (auto-release.yml sets it on
+// its daily schedule), nothing is due until that many days have passed since
+// the last release, however much changed. Electron publishes a patch every
+// two or three days; shipping each one would have users download an update
+// every other day. What piles up meanwhile goes out together in the next
+// release. The clock is the last release tag's commit date.
+//
+// Usage: [RELEASE_MIN_DAYS=4] node scripts/release-due.mjs [--force]
 // Prints its reasoning and, under GitHub Actions, writes to $GITHUB_OUTPUT:
 //   due=true|false   next=X.Y.Z   notes<<EOF (markdown list of what changed)
 // Fails CLOSED: any doubt (no tag, a version bump already in progress, a
@@ -26,6 +33,17 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 
 const force = process.argv.includes('--force');
+
+// The spacing, in days. A value that is not a number is a configuration
+// mistake (the AUTO_RELEASE_MIN_DAYS repository variable): it must stop the
+// job loudly. Answering "not due" would look like a quiet day, every day,
+// while fixes pile up unreleased; ignoring it would release every day.
+const minDaysRaw = (process.env.RELEASE_MIN_DAYS ?? '').trim();
+const minDays = minDaysRaw === '' ? 0 : Number(minDaysRaw);
+if (!Number.isFinite(minDays) || minDays < 0) {
+  console.error(`RELEASE_MIN_DAYS must be a number of days, got "${minDaysRaw}".`);
+  process.exit(1);
+}
 const git = (...args) =>
   execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const readJsonAt = (ref, file) => JSON.parse(git('show', `${ref}:${file}`));
@@ -75,6 +93,22 @@ function decide() {
   const notes = changes.length
     ? changes.map((c) => `- \`${c.name}\` ${c.from ?? '(new)'} → ${c.to}`).join('\n')
     : '- (forced: no shipped dependency changed)';
+
+  // Something is waiting to ship: is it too soon after the last release?
+  if (minDays > 0) {
+    const releasedAt = Number(git('log', '-1', '--format=%ct', lastTag)) * 1000;
+    const ageDays = (Date.now() - releasedAt) / 86_400_000;
+    if (ageDays < minDays) {
+      const notBefore = new Date(releasedAt + minDays * 86_400_000).toISOString().slice(0, 16).replace('T', ' ');
+      return {
+        due: false,
+        reason:
+          `${lastTag} went out ${ageDays.toFixed(1)} days ago and releases are at least ${minDays} days apart: ` +
+          `${changes.length} change(s) wait until ${notBefore} UTC`,
+      };
+    }
+  }
+
   return {
     due: true,
     next,

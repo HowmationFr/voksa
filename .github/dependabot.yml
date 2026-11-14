@@ -27,13 +27,15 @@ updates:
       # pinned exactly. A bump must port the patch by hand; the vitest guard
       # (webstorePatch.test.ts) fails if the installed files lose the checks.
       - dependency-name: electron-chrome-web-store
-      # MAJORS ARE OURS. A major version is a planned migration (Electron 43,
-      # React 19, Tailwind 4...), decided and scheduled by a human, never
-      # inbound mail. Security fixes travel as patch/minor and keep flowing;
-      # a fix that only exists in a new major still raises the CVE alert
-      # (alerts are independent of update PRs). This also ends the hydra
-      # effect: ignoring one major just makes Dependabot propose the next
-      # one down.
+      # MAJORS ARE NOT DEPENDABOT'S. A major version is a migration (Electron
+      # 43, React 19, Tailwind 4...): it needs code changes, not a version
+      # bump, so a bare bump PR would only sit there red. They are carried
+      # out one at a time by the upgrade agent instead (electron-major.yml,
+      # dependency-majors.yml, see .github/AUTOMATION.md). Security fixes
+      # travel as patch/minor and keep flowing here; a fix that only exists
+      # in a new major still raises the CVE alert (alerts are independent of
+      # update PRs). This also ends the hydra effect: ignoring one major just
+      # makes Dependabot propose the next one down.
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
     groups:

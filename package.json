@@ -26,7 +26,7 @@
     "package:linux": "npm run build && electron-builder --linux"
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.3",
+    "better-sqlite3": "^13.1.1",
     "electron-chrome-extensions": "4.10.0",
     "electron-chrome-web-store": "0.13.0",
     "electron-updater": "^6.8.11"
@@ -43,7 +43,7 @@
     "@typescript-eslint/parser": "^8.72.2",
     "@vitejs/plugin-react": "^5.2.0",
     "autoprefixer": "^10.6.2",
-    "electron": "^45.2.3",
+    "electron": "^45.3.0",
     "electron-builder": "^26.18.0",
     "esbuild": "^0.28.2",
     "eslint": "^9.39.5",
@@ -54,14 +54,14 @@
     "node-abi": "^4.40.0",
     "patch-package": "^8.0.1",
     "postcss": "^8.5.32",
-    "prettier": "^3.9.10",
+    "prettier": "^3.10.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "selfsigned": "^5.5.0",
     "tailwindcss": "^3.4.13",
     "typescript": "^5.6.2",
     "typescript-eslint": "^8.72.2",
-    "vite": "^8.3.7",
+    "vite": "^8.3.8",
     "vitest": "^4.1.12",
     "ws": "^8.22.2",
     "zustand": "^5.1.0"

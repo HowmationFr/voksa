@@ -72,6 +72,21 @@ const PACKAGE_JSON = {
 };
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
+/** An end-to-end suite the way scripts/smoke.mjs is written: one pass('NAME') per scenario. */
+const SMOKE = [
+  '// end-to-end suite',
+  "const pass = (name) => console.log(`[smoke] ${name}: OK`);",
+  'async function main() {',
+  '  await boot();',
+  "  pass('BOOT');",
+  '  await streamMode();',
+  "  pass('STREAM MODE: masked before paint');",
+  '  await panic();',
+  "  pass('PANIC');",
+  '}',
+  '',
+].join('\n');
+
 /** The repository before the agent: one of every kind of file the gate tells apart. */
 const BASE: Record<string, string> = {
   'package.json': json(PACKAGE_JSON),
@@ -82,7 +97,7 @@ const BASE: Record<string, string> = {
   'eslint.config.mjs': 'export default [];\n',
   'vitest.config.ts': 'export default {};\n',
   'tsconfig.main.json': '{}\n',
-  'scripts/smoke.mjs': '// end-to-end suite\n',
+  'scripts/smoke.mjs': SMOKE,
   'scripts/check-packaged.mjs': '// packaged app check\n',
   'scripts/version-only-diff.mjs': '// CI scope probe\n',
   'scripts/fixtures/page.html': '<p>fixture</p>\n',
@@ -105,6 +120,8 @@ type Scenario = {
   /** Files the agent wrote on top of BASE (null, it deleted the file). */
   files?: Record<string, string | null>;
   env?: Record<string, string>;
+  /** Files that differ from BASE in the repository the branch starts from. */
+  base?: Record<string, string>;
 };
 
 type Outcome = StepResult & {
@@ -124,7 +141,7 @@ const prScript = stepRun(workflow, 'id: pr');
 
 async function decide(scenario: Scenario): Promise<Outcome> {
   const repo = new GitFixture(sandbox);
-  for (const [file, content] of Object.entries(BASE)) repo.writeText(file, content);
+  for (const [file, content] of Object.entries({ ...BASE, ...scenario.base })) repo.writeText(file, content);
   repo.commit('base');
   repo.git(['switch', '-q', '-c', 'automation/test']);
   for (const [file, content] of Object.entries(scenario.files ?? UPGRADE)) {
@@ -193,6 +210,18 @@ const MERGES: Record<string, Scenario> = {
     files: withUpgrade({ 'src/ui/New.test.ts': 'it is new\n' }),
     env: { TESTS_AFTER: '532' },
   },
+  // The end-to-end suite and its fixtures too (an Electron major changes
+  // what the suite drives), as long as every scenario is still there.
+  'the end-to-end suite was adapted, every scenario kept': {
+    report: READY,
+    files: withUpgrade({
+      'scripts/smoke.mjs': SMOKE.replace('  await panic();', '  await panicThroughTheNewApi();').replace(
+        '}\n',
+        "  pass('A NEW SCENARIO');\n}\n",
+      ),
+      'scripts/fixtures/page.html': '<p>adapted</p>\n',
+    }),
+  },
   'a build script was adapted (it is not a judge)': {
     report: READY,
     files: withUpgrade({ 'scripts/build-main.mjs': '// build, adapted\n' }),
@@ -231,15 +260,31 @@ const HELD: Record<string, Scenario & { says: string }> = {
     files: withUpgrade({ 'tsconfig.main.json': '{ "include": [] }\n' }),
     says: '`tsconfig.main.json`',
   },
-  'the end-to-end suite was edited': {
+  // What still watches the end-to-end suite the agent may edit: its scenarios.
+  'an end-to-end scenario was removed': {
     report: READY,
-    files: withUpgrade({ 'scripts/smoke.mjs': '// end-to-end suite, shorter\n' }),
-    says: '`scripts/smoke.mjs`',
+    files: withUpgrade({ 'scripts/smoke.mjs': SMOKE.replace("  await panic();\n  pass('PANIC');\n", '') }),
+    says: '  - `PANIC`',
   },
-  'a fixture of the end-to-end suite was edited': {
+  'an end-to-end scenario was commented out': {
     report: READY,
-    files: withUpgrade({ 'scripts/fixtures/page.html': '<p>other</p>\n' }),
-    says: '`scripts/fixtures/page.html`',
+    files: withUpgrade({ 'scripts/smoke.mjs': SMOKE.replace("  pass('PANIC');", "  // pass('PANIC');") }),
+    says: '  - `PANIC`',
+  },
+  'an end-to-end scenario was renamed': {
+    report: READY,
+    files: withUpgrade({ 'scripts/smoke.mjs': SMOKE.replace('STREAM MODE: masked before paint', 'STREAM MODE') }),
+    says: '  - `STREAM MODE: masked before paint`',
+  },
+  'the end-to-end suite was deleted': {
+    report: READY,
+    files: withUpgrade({ 'scripts/smoke.mjs': null }),
+    says: '  - `BOOT`',
+  },
+  'the scenarios of the suite it started from cannot be listed': {
+    report: READY,
+    base: { 'scripts/smoke.mjs': '// scenarios declared some other way\n' },
+    says: 'could not be listed',
   },
   'the packaged-app check was edited': {
     report: READY,
@@ -380,7 +425,8 @@ describe.runIf(canRunSteps())('agent-upgrade.yml: does this upgrade merge on its
         'verdict is not',
         'before: 531, after: 12',
         'were discarded',
-        '`scripts/smoke.mjs`',
+        'lost scenarios',
+        '  - `BOOT`',
         '`eslint.config.mjs`',
       ]) {
         expect(hold).toContain(reason);

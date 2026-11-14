@@ -1,6 +1,7 @@
 import { Menu, MenuItemConstructorOptions, app, shell } from 'electron';
 import type { AppWindow } from './window';
 import { openNewWindow } from './windows';
+import { openFilesWithDialog } from './openFile';
 import { getStreamMode } from './stream-mode/StreamModeController';
 import { getSettings, setSettings } from './storage/settings';
 import { IPC } from '../shared/ipcChannels';
@@ -63,6 +64,14 @@ export function buildApplicationMenu(getApp: () => AppWindow | null): Menu {
           label: t('Nouvelle fenêtre'),
           accelerator: 'CmdOrCtrl+N',
           click: () => void openNewWindow(),
+        },
+        {
+          label: t('Ouvrir un fichier…'),
+          accelerator: 'CmdOrCtrl+O',
+          click: () => {
+            const win = getApp();
+            if (win) void openFilesWithDialog(win);
+          },
         },
         {
           label: t('Rouvrir l’onglet fermé'),

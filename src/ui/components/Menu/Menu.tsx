@@ -5,6 +5,7 @@ import {
   BookOpen,
   Clock,
   Download,
+  FolderOpen,
   Minus,
   Plus,
   Printer,
@@ -82,6 +83,17 @@ export function Menu({ onClose, onOpenFind, onOpenPrint }: Props): React.ReactEl
           onClick={() => {
             onClose();
             void voksa.window.openNew();
+          }}
+        />
+        <MenuItem
+          icon={FolderOpen}
+          label={t('Ouvrir un fichier…')}
+          hint={shortcut('O')}
+          onClick={() => {
+            onClose();
+            // The dialog is native and modal; a failure (window gone) has
+            // nothing to show for itself here.
+            void voksa.files.openDialog().catch(() => undefined);
           }}
         />
 

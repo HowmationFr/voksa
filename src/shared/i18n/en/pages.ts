@@ -76,6 +76,7 @@ export const enPages: Record<string, string> = {
   // ErrorPage.tsx
   "L'adresse est introuvable (DNS). Vérifiez le nom du site.":
     'The address could not be found (DNS). Check the site name.',
+  'Ce fichier est introuvable.': 'This file could not be found.',
   'Vous semblez hors ligne.': 'You appear to be offline.',
   'Le site est injoignable.': 'The site is unreachable.',
   'La connexion a expiré.': 'The connection timed out.',

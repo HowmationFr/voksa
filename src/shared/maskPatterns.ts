@@ -19,7 +19,49 @@ export const MASK = {
   PHONE: '·· ·· ·· ·· ··',
   MAC: 'xx:xx:xx:xx:xx:xx',
   HOSTNAME: 'xxxxxx',
+  /**
+   * What replaces the directory of a local file URL; the file name follows.
+   * ASCII on purpose: the hover masker writes a masked URL into `a.href` and
+   * reads it back, and the URL parser would percent-encode an ellipsis into
+   * something that needs masking again, forever. Three dots are a plain path
+   * segment and come back unchanged.
+   */
+  FILE_DIR: 'file:///.../',
 } as const;
+
+/**
+ * A local file URL, from `file:` to the end of its line. The directory of a
+ * local file names the OS account (`C:/Users/<name>/…`, `/home/<name>/…`), so
+ * it is never shown: `file:///C:/Users/bob/Pictures/x.png` reads
+ * `file:///.../x.png`.
+ *
+ * - Every spelling that loads counts: any number of slashes or backslashes
+ *   (`file:/C:/…` is what Java tooling prints, `file:///C:\…` what a pasted
+ *   Explorer path gives), or none before a drive letter (`file:C:/…`).
+ * - A path must actually start: the words "the file:// scheme" are not a URL.
+ * - It runs to the end of the LINE, stopping only at `"`, `<` and `>`: a path
+ *   as typed still has its raw spaces and apostrophes (`C:/Users/Jean
+ *   Dupont/…`), and stopping at the first one would show the rest. Text after
+ *   the URL on the same line survives when it follows the last separator.
+ *
+ * Linear: a literal prefix, a bounded choice, then one greedy class.
+ */
+export const FILE_URL_RE = /\bfile:(?:[\\/]+(?=[^\s"<>\\/])|(?=[a-z]:[\\/]))[^\r\n"<>]*/gi;
+
+/**
+ * Collapse one match of FILE_URL_RE. Everything up to the last separator goes,
+ * and so does everything from the first `?` or `#` (a query can hold a path of
+ * its own). Of what follows the last separator, the leading word is kept only
+ * if it has an extension: without one it is a folder, possibly the account's
+ * own (`file:///C:/Users/bob`). Idempotent, as every rule of maskText must be.
+ */
+function redactFileUrl(url: string): string {
+  const path = url.replace(/[?#].*$/, '');
+  const last = path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
+  const word = /^\S*/.exec(last)?.[0] ?? '';
+  const name = word.lastIndexOf('.') > 0 ? word : '';
+  return `${MASK.FILE_DIR}${name}${last.slice(word.length)}`;
+}
 
 /** IPv4 dotted-quad with word boundaries. */
 export const IPV4_RE =
@@ -181,6 +223,13 @@ export function maskText(
       (m) => byKey.get(m.toLowerCase()) ?? '•'.repeat(Math.max(3, m.length)),
     );
   }
+
+  // Local file URLs lose their directory. No flag: there is no "show my
+  // account name" category to switch off. (Inside pages this still rides with
+  // the masker, which only runs when hasAnyMask says so; the chrome UI calls
+  // maskText whenever Stream Mode is on.) After the replacements, so one that
+  // produces a file URL is collapsed like any other: the safe outcome wins.
+  out = out.replace(FILE_URL_RE, redactFileUrl);
 
   if (flags.maskIPv4) {
     out = out.replace(IPV4_RE, (m) => (isPrivateIPv4(m) ? m : MASK.IPV4));

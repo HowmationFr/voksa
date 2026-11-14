@@ -1,5 +1,6 @@
 import { type WebContentsView } from 'electron';
 import { IPC } from '../../shared/ipcChannels';
+import { PANIC_CURTAIN_ID } from '../../shared/panicCurtain';
 
 /**
  * Stream Mode v2: the curtain is now PURELY cosmetic (anti-flicker). The
@@ -32,6 +33,25 @@ const UI_ACK_TIMEOUT_MS = 600;
  * itself, with no curtain and no load.
  */
 const CAPTURE_TIMEOUT_MS = 300;
+/**
+ * The panic cover is repeated at this pace until the chrome UI acknowledges
+ * it. A navigation curtain can afford to be lost (the shroud holds the page);
+ * this one cannot, and a chrome UI that is still booting (a window opened
+ * while panic is up) has no listener yet.
+ */
+const PANIC_RESEND_MS = 100;
+/**
+ * ...and for this many times at most (5 s). The repeat is for the boot race,
+ * which is over in a few hundred ms. Past that, a UI that has not acknowledged
+ * is not deaf, it is hidden: the ack rides on requestAnimationFrame, which a
+ * minimized window does not run (and panic is a GLOBAL hotkey, often pressed
+ * with Voksa minimized behind a game). Such a UI already holds the cover in
+ * its state and paints it the moment it is shown; repeating to it forever
+ * would only queue frames callbacks until then.
+ */
+const PANIC_MAX_RESENDS = 50;
+/** Overlay refcount key of the panic cover (the navigation ones are per tab). */
+const PANIC_OVERLAY_KEY = 'panic';
 
 export type OverlayController = {
   acquire: (key: string) => void;
@@ -64,6 +84,8 @@ type CurtainRecord = {
   token: number;
   expectedNonce: string | null;
   safetyTimer: NodeJS.Timeout;
+  /** The UI was handed a screenshot backdrop (panic turns it solid). */
+  screenshot?: boolean;
 };
 
 export type BackdropKind = 'screenshot' | 'solid';
@@ -72,11 +94,114 @@ export class CurtainController {
   private records = new Map<string, CurtainRecord>();
   private ackResolvers = new Map<string, () => void>();
   private nextToken = 1;
+  /** Token of the panic cover while it is up, null otherwise. */
+  private panicToken: number | null = null;
+  private panicAcked = false;
+  private panicResend: NodeJS.Timeout | null = null;
+  private panicResendsLeft = 0;
 
   constructor(
     private readonly chromeView: WebContentsView,
     private readonly overlay: OverlayController,
-  ) {}
+  ) {
+    // A chrome UI document that (re)loads starts with an empty store: under
+    // panic it must be handed the cover again, or main would believe in a
+    // cover nobody paints. Also what covers a window whose UI was still
+    // loading when panic was pressed.
+    chromeView.webContents.on('did-finish-load', () => {
+      if (this.panicToken === null) return;
+      this.stopPanicResend();
+      this.panicAcked = false;
+      this.panicResendsLeft = PANIC_MAX_RESENDS;
+      this.sendPanicCover();
+    });
+  }
+
+  // --- Panic cover ------------------------------------------------------------
+  //
+  // NOT a navigation curtain, and deliberately outside `records`. A navigation
+  // curtain is cosmetic: it lifts on the masker's ready, on a failed load, on
+  // the 6s fail-to-blank timer, because the renderer shroud is what actually
+  // hides the page. Panic covers pages that are ALREADY painted, with no
+  // shroud behind the panel, so each of those exits would put back on screen
+  // exactly what the user panicked about. (Lived: panic used to raise ordinary
+  // curtains. They dropped after 6s with Stream Mode on, and within
+  // milliseconds when panic itself armed it, since arming makes every tab's
+  // masker sweep and send a ready.)
+  //
+  // So: one solid cover per WINDOW, keyed by a sentinel instead of a tab id
+  // (it also covers tabs created or revived while it is up), with a single way
+  // down, setPanic(false).
+
+  isPanic(): boolean {
+    return this.panicToken !== null;
+  }
+
+  setPanic(on: boolean): void {
+    if (on) {
+      if (this.panicToken !== null) return;
+      this.panicToken = this.nextToken++;
+      this.panicAcked = false;
+      this.panicResendsLeft = PANIC_MAX_RESENDS;
+      this.overlay.acquire(PANIC_OVERLAY_KEY);
+      this.sendPanicCover();
+      // A navigation curtain already painted with a screenshot keeps that
+      // frame in the UI, where it would resurface when panic is released:
+      // repaint it solid. Same curtain, same token; only the backdrop goes.
+      for (const [tabId, rec] of this.records) {
+        if (!rec.screenshot) continue;
+        rec.screenshot = false;
+        try {
+          this.chromeView.webContents.send(IPC.CURTAIN_SET, {
+            tabId,
+            token: rec.token,
+            backdrop: null,
+          });
+        } catch {
+          // chromeView destroyed during teardown; ignore
+        }
+      }
+      return;
+    }
+    if (this.panicToken === null) return;
+    this.panicToken = null;
+    this.stopPanicResend();
+    this.overlay.release(PANIC_OVERLAY_KEY);
+    try {
+      this.chromeView.webContents.send(IPC.CURTAIN_CLEAR, { tabId: PANIC_CURTAIN_ID });
+    } catch {
+      // chromeView destroyed during teardown; ignore
+    }
+  }
+
+  private sendPanicCover(): void {
+    const token = this.panicToken;
+    if (token === null) return;
+    try {
+      this.chromeView.webContents.send(IPC.CURTAIN_SET, {
+        tabId: PANIC_CURTAIN_ID,
+        token,
+        backdrop: null,
+      });
+    } catch {
+      // chromeView destroyed: nothing left to cover, and nothing to repeat to.
+      return;
+    }
+    // The ack may already be in (it is synchronous in tests).
+    if (this.panicAcked || this.panicResendsLeft <= 0) return;
+    this.panicResendsLeft -= 1;
+    this.panicResend = setTimeout(() => {
+      this.panicResend = null;
+      if (!this.panicAcked) this.sendPanicCover();
+    }, PANIC_RESEND_MS);
+  }
+
+  private stopPanicResend(): void {
+    if (this.panicResend) {
+      clearTimeout(this.panicResend);
+      this.panicResend = null;
+    }
+  }
 
   isActive(tabId: string): boolean {
     return this.records.has(tabId);
@@ -115,10 +240,18 @@ export class CurtainController {
       safetyTimer: setTimeout(() => this.clear(tabId, token), SAFETY_TIMEOUT_MS),
     });
 
-    const dataURL = kind === 'screenshot' && tabView ? await this.screenshot(tabView) : null;
+    // Never a screenshot under the panic cover: the current frame is exactly
+    // what panic hides, and this backdrop is what would show the moment panic
+    // is released, until the new document is ready.
+    const captured =
+      kind === 'screenshot' && tabView && !this.isPanic() ? await this.screenshot(tabView) : null;
     // Dropped (ready, tab closed, stream off) or superseded during the
     // screenshot: painting it now would put up a stale curtain.
-    if (this.records.get(tabId)?.token !== token) return;
+    const rec = this.records.get(tabId);
+    if (!rec || rec.token !== token) return;
+    // Panic may have started while the screenshot was being taken.
+    const dataURL = this.isPanic() ? null : captured;
+    rec.screenshot = dataURL !== null;
 
     this.overlay.acquire(this.overlayKey(tabId));
     await this.waitForAck(tabId, token, dataURL);
@@ -174,6 +307,15 @@ export class CurtainController {
 
   /** The chrome UI confirmed the backdrop is painted. */
   ackFromUi(tabId: string, token: number): void {
+    if (tabId === PANIC_CURTAIN_ID) {
+      // Only the ack of the cover that is up counts: a late one from a
+      // previous panic must not stop the repeat of this one.
+      if (token === this.panicToken) {
+        this.panicAcked = true;
+        this.stopPanicResend();
+      }
+      return;
+    }
     this.ackResolvers.get(this.ackKey(tabId, token))?.();
   }
 

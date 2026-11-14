@@ -11,6 +11,7 @@ import {
 import { registerIpcHandlers, wireWindowIpc } from './ipc/handlers';
 import { buildApplicationMenu } from './menu';
 import { getStreamMode } from './stream-mode/StreamModeController';
+import { isPanicActive } from './stream-mode/panicState';
 import { RecorderWatcher } from './stream-mode/recorderWatcher';
 import { installWebRtcPolicy } from './stream-mode/webrtcPolicy';
 import { getMemorySaver } from './perf/MemorySaverController';
@@ -232,6 +233,10 @@ async function createWindow(opts?: BootstrapOptions): Promise<AppWindow> {
   wireWindowIpc(win);
   wireSessionPersistence(win);
   await win.bootstrap(opts ?? { open: { kind: 'newtab' } });
+  // A window born while panic is up (a second launch, a link clicked in
+  // another app) is covered like the others: the user asked for NO Voksa
+  // window to show anything. Its tabs are already muted (Tab reads the flag).
+  if (isPanicActive()) win.tabs.panicCover();
   return win;
 }
 

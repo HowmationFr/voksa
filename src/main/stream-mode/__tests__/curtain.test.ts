@@ -2,11 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WebContentsView } from 'electron';
 import { CurtainController, type OverlayController } from '../curtain';
 import { IPC } from '../../../shared/ipcChannels';
+import { PANIC_CURTAIN_ID } from '../../../shared/panicCurtain';
 
 // Keep in sync with the constants in curtain.ts.
 const SAFETY_TIMEOUT_MS = 6000;
 const UI_ACK_TIMEOUT_MS = 600;
 const CAPTURE_TIMEOUT_MS = 300;
+const PANIC_RESEND_MS = 100;
+const PANIC_MAX_RESENDS = 50;
 
 type SentMessage = {
   channel: string;
@@ -34,6 +37,7 @@ function createHarness() {
   const overlay: OverlayController = { acquire, release };
   let autoAck = true;
 
+  const listeners = new Map<string, () => void>();
   const chromeView = {
     webContents: {
       send: (channel: string, payload: SentMessage['payload']) => {
@@ -41,6 +45,9 @@ function createHarness() {
         if (autoAck && channel === IPC.CURTAIN_SET && payload.token != null) {
           controller.ackFromUi(payload.tabId, payload.token);
         }
+      },
+      on: (event: string, listener: () => void) => {
+        listeners.set(event, listener);
       },
     },
   } as unknown as WebContentsView;
@@ -56,6 +63,8 @@ function createHarness() {
     setAutoAck: (v: boolean) => {
       autoAck = v;
     },
+    /** The chrome UI document (re)loaded: a fresh page with an empty store. */
+    finishUiLoad: () => listeners.get('did-finish-load')?.(),
     messages: (channel: string) => sent.filter((m) => m.channel === channel),
   };
 }
@@ -459,6 +468,260 @@ describe('CurtainController', () => {
 
       expect(h.controller.isActive('tab-1')).toBe(false);
       expect(h.release).toHaveBeenCalledWith('curtain:tab-1');
+    });
+  });
+
+  // The panic cover is NOT a navigation curtain. A navigation curtain is
+  // cosmetic and built to lift by itself (ready, failed load, 6s fail-to-blank)
+  // because a renderer shroud holds the page behind it. Panic covers pages that
+  // are already painted, with no shroud: every one of those exits would put
+  // the very thing the user panicked about back on screen. Lived: panic used
+  // to raise ordinary curtains, which dropped after 6s with Stream Mode on,
+  // and within milliseconds when panic itself armed it (the arming sweep sends
+  // a ready).
+  describe('panic cover', () => {
+    const panicSets = (h: ReturnType<typeof createHarness>) =>
+      h.messages(IPC.CURTAIN_SET).filter((m) => m.payload.tabId === PANIC_CURTAIN_ID);
+    const panicClears = (h: ReturnType<typeof createHarness>) =>
+      h.messages(IPC.CURTAIN_CLEAR).filter((m) => m.payload.tabId === PANIC_CURTAIN_ID);
+
+    it('covers the window with a solid panel and expands the chrome over the page', () => {
+      const h = createHarness();
+
+      h.controller.setPanic(true);
+
+      expect(h.controller.isPanic()).toBe(true);
+      expect(panicSets(h)).toHaveLength(1);
+      // Solid, never a screenshot: the current frame is what must disappear.
+      expect(panicSets(h)[0].payload.backdrop).toBeNull();
+      expect(h.isExpanded()).toBe(true);
+    });
+
+    it('no timer ever lifts it', () => {
+      const h = createHarness();
+      h.controller.setPanic(true);
+
+      vi.advanceTimersByTime(SAFETY_TIMEOUT_MS * 20);
+
+      expect(h.controller.isPanic()).toBe(true);
+      expect(panicClears(h)).toHaveLength(0);
+      expect(h.isExpanded()).toBe(true);
+    });
+
+    it('a ready from a tab lifts nothing (panic arming Stream Mode makes every tab send one)', () => {
+      const h = createHarness();
+      h.controller.setPanic(true);
+
+      h.controller.onDocStart('tab-1', 'nonce-1');
+      h.controller.onReady('tab-1', 'nonce-1');
+      h.controller.onReady('tab-2', null);
+
+      expect(h.controller.isPanic()).toBe(true);
+      expect(panicClears(h)).toHaveLength(0);
+      expect(h.isExpanded()).toBe(true);
+    });
+
+    it('survives everything that lifts a navigation curtain raised under it', async () => {
+      const h = createHarness();
+      h.controller.setPanic(true);
+      await h.controller.raise('tab-1', fakeTabView().view, 'screenshot');
+      await h.controller.raise('tab-2', fakeTabView().view, 'solid');
+      await h.controller.raise('tab-3', fakeTabView().view, 'solid');
+
+      h.controller.onReady('tab-1', null); // masker ready
+      h.controller.drop('tab-2'); // failed load, crash, stream toggled off
+      h.controller.handleTabClosed('tab-3'); // tab closed
+      vi.advanceTimersByTime(SAFETY_TIMEOUT_MS + 1); // and the fail-to-blank timer
+
+      for (const id of ['tab-1', 'tab-2', 'tab-3']) expect(h.controller.isActive(id)).toBe(false);
+      expect(h.controller.isPanic()).toBe(true);
+      expect(panicClears(h)).toHaveLength(0);
+      // The navigation keys are all released; the panic key alone keeps the
+      // chrome expanded.
+      expect(h.isExpanded()).toBe(true);
+    });
+
+    it('lifts only when panic is released, once, and gives the overlay back', () => {
+      const h = createHarness();
+      h.controller.setPanic(true);
+      h.controller.setPanic(true); // a second press of "cover" is not a second cover
+
+      h.controller.setPanic(false);
+      h.controller.setPanic(false);
+
+      expect(h.controller.isPanic()).toBe(false);
+      expect(panicSets(h)).toHaveLength(1);
+      expect(panicClears(h)).toHaveLength(1);
+      expect(h.isExpanded()).toBe(false);
+    });
+
+    it('releasing panic leaves a navigation curtain that is still up alone', async () => {
+      const h = createHarness();
+      await h.controller.raise('tab-1', fakeTabView().view, 'solid');
+      h.controller.setPanic(true);
+
+      h.controller.setPanic(false);
+
+      expect(h.controller.isActive('tab-1')).toBe(true);
+      expect(h.isExpanded()).toBe(true);
+      h.controller.onReady('tab-1', null);
+      expect(h.isExpanded()).toBe(false);
+    });
+
+    it('is sent again until the chrome UI acknowledges it (a UI still booting has no listener)', () => {
+      const h = createHarness();
+      h.setAutoAck(false);
+
+      h.controller.setPanic(true);
+      vi.advanceTimersByTime(PANIC_RESEND_MS * 3);
+
+      const sets = panicSets(h);
+      expect(sets.length).toBe(4);
+      // Same token every time: it is one cover, repeated, not four.
+      expect(new Set(sets.map((m) => m.payload.token)).size).toBe(1);
+
+      h.controller.ackFromUi(PANIC_CURTAIN_ID, sets[0].payload.token!);
+      vi.advanceTimersByTime(PANIC_RESEND_MS * 5);
+      expect(panicSets(h)).toHaveLength(4);
+      expect(h.controller.isPanic()).toBe(true);
+    });
+
+    it('an ack for another cover does not stop the resend', () => {
+      const h = createHarness();
+      h.setAutoAck(false);
+      h.controller.setPanic(true);
+
+      h.controller.ackFromUi(PANIC_CURTAIN_ID, 999_999);
+      vi.advanceTimersByTime(PANIC_RESEND_MS);
+
+      expect(panicSets(h)).toHaveLength(2);
+    });
+
+    it('gives up repeating after 5s, and the cover stays up all the same', () => {
+      // A minimized window cannot acknowledge (the ack rides on a frame) but
+      // already holds the cover in its state: repeating forever is pointless.
+      const h = createHarness();
+      h.setAutoAck(false);
+      h.controller.setPanic(true);
+
+      vi.advanceTimersByTime(PANIC_RESEND_MS * PANIC_MAX_RESENDS * 4);
+
+      expect(panicSets(h)).toHaveLength(1 + PANIC_MAX_RESENDS);
+      expect(h.controller.isPanic()).toBe(true);
+      expect(panicClears(h)).toHaveLength(0);
+      expect(h.isExpanded()).toBe(true);
+    });
+
+    it('a new panic repeats afresh after an earlier one gave up', () => {
+      const h = createHarness();
+      h.setAutoAck(false);
+      h.controller.setPanic(true);
+      vi.advanceTimersByTime(PANIC_RESEND_MS * PANIC_MAX_RESENDS * 2);
+      h.controller.setPanic(false);
+      const before = panicSets(h).length;
+
+      h.controller.setPanic(true);
+      vi.advanceTimersByTime(PANIC_RESEND_MS * 3);
+
+      expect(panicSets(h).length - before).toBe(4);
+    });
+
+    it('stops resending the moment panic is released', () => {
+      const h = createHarness();
+      h.setAutoAck(false);
+      h.controller.setPanic(true);
+
+      h.controller.setPanic(false);
+      vi.advanceTimersByTime(PANIC_RESEND_MS * 5);
+
+      expect(panicSets(h)).toHaveLength(1);
+      expect(panicClears(h)).toHaveLength(1);
+    });
+
+    // A navigation curtain's screenshot is the frame of the page being left.
+    // Under panic that frame is exactly what must not be seen, and the
+    // backdrop would be what shows the moment panic is released.
+    describe('no screenshot backdrop may outlive it', () => {
+      const tabSets = (h: ReturnType<typeof createHarness>, tabId: string) =>
+        h.messages(IPC.CURTAIN_SET).filter((m) => m.payload.tabId === tabId);
+
+      it('a navigation curtain raised under panic is solid, and takes no screenshot', async () => {
+        const h = createHarness();
+        const tab = fakeTabView({ dataURL: 'data:image/png;base64,the-panicked-about-frame' });
+        h.controller.setPanic(true);
+
+        await h.controller.raise('tab-1', tab.view, 'screenshot');
+
+        expect(tab.capturePage).not.toHaveBeenCalled();
+        expect(tabSets(h, 'tab-1').map((m) => m.payload.backdrop)).toEqual([null]);
+      });
+
+      it('a screenshot still being taken when panic starts is thrown away', async () => {
+        const h = createHarness();
+        const tab = fakeTabView({ dataURL: 'data:image/png;base64,the-panicked-about-frame' });
+
+        const raising = h.controller.raise('tab-1', tab.view, 'screenshot');
+        h.controller.setPanic(true);
+        await raising;
+
+        expect(tab.capturePage).toHaveBeenCalledTimes(1);
+        expect(tabSets(h, 'tab-1').every((m) => m.payload.backdrop === null)).toBe(true);
+      });
+
+      it('a screenshot curtain already painted is turned solid when panic starts', async () => {
+        const h = createHarness();
+        const tab = fakeTabView({ dataURL: 'data:image/png;base64,the-panicked-about-frame' });
+        await h.controller.raise('tab-1', tab.view, 'screenshot');
+        const painted = tabSets(h, 'tab-1');
+        expect(painted[0].payload.backdrop).toBe('data:image/png;base64,the-panicked-about-frame');
+
+        h.controller.setPanic(true);
+
+        const after = tabSets(h, 'tab-1');
+        expect(after).toHaveLength(2);
+        expect(after[1].payload.backdrop).toBeNull();
+        // The same curtain, repainted: its token (and so its ready/clear
+        // pairing) is untouched.
+        expect(after[1].payload.token).toBe(painted[0].payload.token);
+        expect(h.controller.isActive('tab-1')).toBe(true);
+      });
+    });
+
+    describe('a chrome UI that reloads under panic', () => {
+      it('gets the cover again: its store came back empty', () => {
+        const h = createHarness();
+        h.controller.setPanic(true);
+        expect(panicSets(h)).toHaveLength(1);
+
+        h.finishUiLoad();
+
+        expect(panicSets(h)).toHaveLength(2);
+        expect(h.controller.isPanic()).toBe(true);
+      });
+
+      it('gets a fresh repeat budget, even after the first one ran out', () => {
+        const h = createHarness();
+        h.setAutoAck(false);
+        h.controller.setPanic(true);
+        vi.advanceTimersByTime(PANIC_RESEND_MS * PANIC_MAX_RESENDS * 2);
+        const spent = panicSets(h).length;
+
+        h.finishUiLoad();
+        vi.advanceTimersByTime(PANIC_RESEND_MS * 3);
+
+        expect(panicSets(h).length - spent).toBe(4);
+      });
+
+      it('gets nothing when panic is not up', () => {
+        const h = createHarness();
+
+        h.finishUiLoad();
+        h.controller.setPanic(true);
+        h.controller.setPanic(false);
+        h.finishUiLoad();
+
+        expect(panicSets(h)).toHaveLength(1);
+      });
     });
   });
 });

@@ -126,3 +126,62 @@ describe('isUrlLike and normalizeInput can never disagree', () => {
     expect(normalizeInput('localhost:3000 cors error', GOOGLE)).toContain('search?q=');
   });
 });
+
+describe('local file paths typed or pasted in the address bar', () => {
+  // The platform is passed explicitly: the default follows the machine the
+  // suite runs on, and CI runs it on three of them.
+  it('opens an absolute path to an openable file instead of searching for it', () => {
+    expect(normalizeInput('C:\\Users\\me\\My pic.png', GOOGLE, 'win32')).toBe(
+      'file:///C:/Users/me/My%20pic.png',
+    );
+    expect(normalizeInput('"C:\\Users\\me\\My pic.png"', GOOGLE, 'win32')).toBe(
+      'file:///C:/Users/me/My%20pic.png',
+    );
+    expect(normalizeInput('/home/me/My pics/a.png', GOOGLE, 'posix')).toBe(
+      'file:///home/me/My%20pics/a.png',
+    );
+  });
+
+  it('leaves everything else exactly as it was: a search', () => {
+    // An active document is never opened from a bare path (see localFiles.ts),
+    // a folder is not a file, and a path of the other platform is just text.
+    for (const [input, platform] of [
+      ['C:\\x\\page.html', 'win32'],
+      ['C:\\Users\\me\\Pictures\\', 'win32'],
+      ['C:\\Users\\me\\My pic.png', 'posix'],
+      ['/home/me/a.png', 'win32'],
+      ['/r/programming', 'posix'],
+    ] as const) {
+      expect(normalizeInput(input, GOOGLE, platform), input).toContain('search?q=');
+      expect(isUrlLike(input, platform), input).toBe(false);
+    }
+  });
+
+  it('keeps the dropdown and Enter in agreement on paths too', () => {
+    for (const [input, platform] of [
+      ['C:\\Users\\me\\My pic.png', 'win32'],
+      ['"C:\\a.png"', 'win32'],
+      ['\\\\nas\\photos\\a.png', 'win32'],
+      ['/home/me/My pics/a.png', 'posix'],
+    ] as const) {
+      expect(isUrlLike(input, platform), input).toBe(true);
+      expect(normalizeInput(input, GOOGLE, platform).startsWith('file://'), input).toBe(true);
+    }
+  });
+
+  it("never reads a path into input that did not come from the user's keyboard", () => {
+    // 'none' is what TabManager.create passes for a URL supplied by a page,
+    // an extension or the OS: "c:/Users/…/a.png" is a valid URL of scheme "c"
+    // there, and must not become a local file.
+    for (const input of ['C:\\Users\\me\\a.png', 'c:/Users/me/a.png', '\\\\nas\\photos\\a.png', '/home/me/a.png']) {
+      expect(isUrlLike(input, 'none'), input).toBe(false);
+      expect(normalizeInput(input, GOOGLE, 'none'), input).toContain('search?q=');
+    }
+  });
+
+  it('still passes an explicit file: URL through untouched, whatever its type', () => {
+    expect(normalizeInput('file:///C:/site/index.html', GOOGLE, 'win32')).toBe(
+      'file:///C:/site/index.html',
+    );
+  });
+});

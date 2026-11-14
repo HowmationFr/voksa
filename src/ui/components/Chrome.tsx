@@ -15,11 +15,13 @@ import { SoundSignals } from './SoundSignals';
 import type { PageMenuPayload } from '../../shared/types';
 import { ConfirmDialogHost } from './ui/ConfirmDialog';
 import { voksa } from '../lib/bridge';
+import { useFileDrop } from '../lib/useFileDrop';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useTabsStore } from '../stores/tabsStore';
 import { useStreamStore } from '../stores/streamStore';
 import { useCurtainStore } from '../stores/curtainStore';
 import { buildStreamColorCss } from '../../shared/streamColor';
+import { PANIC_CURTAIN_ID } from '../../shared/panicCurtain';
 
 function internalSlugForUrl(url: string): Slug | null {
   if (!url.startsWith('voksa://')) return null;
@@ -93,6 +95,9 @@ export function Chrome(): React.ReactElement {
     void voksa.tabs.setOverlayMode(chromeExpanded);
   }, [chromeExpanded]);
 
+  // OS files dropped anywhere on the chrome UI open in new tabs.
+  useFileDrop();
+
   // Menu → renderer command bus (single source of truth = menu accelerators).
   useEffect(() => {
     return voksa.menu.onCommand((command) => {
@@ -134,7 +139,12 @@ export function Chrome(): React.ReactElement {
     return () => ro.disconnect();
   }, [showBookmarkBar, findOpen]);
 
-  const curtainVisible = curtain !== null;
+  // Panic: a window-wide cover, whatever tab is in front (a new or revived one
+  // included). Always the solid panel: a navigation curtain's screenshot
+  // backdrop is the very frame panic is there to hide.
+  const panicCover = useCurtainStore((s) => s.curtains.has(PANIC_CURTAIN_ID));
+  const curtainVisible = curtain !== null || panicCover;
+  const curtainBackdrop = panicCover ? null : (curtain?.backdrop ?? null);
 
   return (
     <div className="relative flex flex-col h-screen w-screen">
@@ -162,9 +172,9 @@ export function Chrome(): React.ReactElement {
       <div className="flex-1 min-h-0 relative">
         {curtainVisible && (
           <div data-testid="curtain" className="absolute inset-0">
-            {curtain?.backdrop ? (
+            {curtainBackdrop ? (
               <img
-                src={curtain.backdrop}
+                src={curtainBackdrop}
                 alt=""
                 draggable={false}
                 className="absolute inset-0 w-full h-full object-cover object-top pointer-events-none select-none"

@@ -6,7 +6,7 @@ import {
   ExternalLink,
   FolderInput,
   Gauge,
-  Github,
+  GitBranch,
   Globe,
   Info,
   Monitor,
@@ -21,7 +21,7 @@ import {
   Sun,
   Trash2,
   X,
-  Youtube,
+  SquarePlay,
 } from 'lucide-react';
 import {
   getEngine,
@@ -1273,12 +1273,12 @@ function AboutCard(): React.ReactElement {
             its own links to another browser is a browser that does not trust
             itself). tabs.create normalizes and routes them like any address. */}
         <LinkRow
-          icon={<Youtube size={16} className="text-danger" />}
+          icon={<SquarePlay size={16} className="text-danger" />}
           label={t('Voir la chaîne Howmation')}
           onClick={() => openTab(YOUTUBE_URL)}
         />
         <LinkRow
-          icon={<Github size={16} />}
+          icon={<GitBranch size={16} />}
           label={t('Voir le dépôt GitHub')}
           onClick={() => openTab(GITHUB_URL)}
         />
